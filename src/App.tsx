@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import {
   AlertTriangle,
@@ -137,6 +138,51 @@ function fileNameWithoutExtension(name: string) {
   return name.replace(/\.[^/.]+$/, '');
 }
 
+type ViewportSize = { width: number; height: number };
+
+function readViewportSize(): ViewportSize {
+  if (typeof window === 'undefined') return { width: 0, height: 0 };
+  return {
+    width: Math.round(window.visualViewport?.width ?? window.innerWidth),
+    height: Math.round(window.visualViewport?.height ?? window.innerHeight),
+  };
+}
+
+function useViewportSize() {
+  const [viewport, setViewport] = useState<ViewportSize>(readViewportSize);
+
+  useEffect(() => {
+    const update = () => {
+      const next = readViewportSize();
+      setViewport((current) => current.width === next.width && current.height === next.height ? current : next);
+    };
+    const visualViewport = window.visualViewport;
+    window.addEventListener('resize', update);
+    window.addEventListener('orientationchange', update);
+    visualViewport?.addEventListener('resize', update);
+    update();
+    return () => {
+      window.removeEventListener('resize', update);
+      window.removeEventListener('orientationchange', update);
+      visualViewport?.removeEventListener('resize', update);
+    };
+  }, []);
+
+  return viewport;
+}
+
+function workspaceMetrics(viewport: ViewportSize) {
+  const isMobile = viewport.width > 0 && viewport.width <= 820;
+  const paddingX = Math.round(Math.min(isMobile ? 20 : 48, Math.max(isMobile ? 12 : 24, viewport.width * (isMobile ? 0.04 : 0.03))));
+  const paddingY = Math.round(Math.min(isMobile ? 18 : 28, Math.max(12, viewport.height * 0.025)));
+  const pageMaxWidth = 1540;
+  const areaWidth = Math.max(0, Math.min(viewport.width - paddingX * 2, pageMaxWidth - paddingX * 2));
+  const topbarHeight = isMobile ? 62 : 72;
+  const fixedRowsHeight = isMobile ? 58 + 67 + 18 : 65 + 75 + 18;
+  const areaHeight = Math.max(0, viewport.height - topbarHeight - paddingY * 2 - fixedRowsHeight);
+  return { paddingX, paddingY, areaWidth, areaHeight };
+}
+
 async function fileToAsset(file: File) {
   if (!file.type.startsWith('image/')) return null;
   const [asset, metadata] = await Promise.all([createAssetFromBlob(file, file.name, file), readImageMetadata(file)]);
@@ -146,6 +192,7 @@ async function fileToAsset(file: File) {
 function App() {
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
+  const viewport = useViewportSize();
   const [notice, setNotice] = useState<Notice>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -172,6 +219,13 @@ function App() {
   const activeAsset = assets.find((asset) => asset.id === activeAssetId) ?? assets[0] ?? null;
   const canUndo = undoStack.length > 0;
   const canRedo = redoStack.length > 0;
+  const metrics = workspaceMetrics(viewport);
+  const workspaceStyle = {
+    '--workspace-padding-x': `${metrics.paddingX}px`,
+    '--workspace-padding-y': `${metrics.paddingY}px`,
+    '--workspace-area-width': `${metrics.areaWidth}px`,
+    '--workspace-area-height': `${metrics.areaHeight}px`,
+  } as CSSProperties;
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -422,7 +476,7 @@ function App() {
   const pageClass = `app-shell ${theme === 'dark' ? 'theme-dark' : ''} ${assets.length ? 'has-workspace' : ''}`;
 
   return (
-    <div className={pageClass}>
+    <div className={pageClass} style={assets.length ? workspaceStyle : undefined}>
       <input ref={fileInput} className="visually-hidden" type="file" accept="image/*" multiple onChange={(event) => void handleFiles(Array.from(event.target.files ?? []))} />
       <input ref={folderInput} className="visually-hidden" type="file" accept="image/*" multiple {...({ webkitdirectory: '' } as Record<string, string>)} onChange={(event) => void handleFiles(Array.from(event.target.files ?? []), '文件夹')} />
       <header className="topbar">
