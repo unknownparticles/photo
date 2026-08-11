@@ -155,6 +155,10 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .app-shell.theme-dark .ai-task-card.is-selected { color: #f0d97d; border-color: #8b7941; background: #3b3420; }
 .app-shell.theme-dark .ai-fallback-button { border-color: #52614d; }
 .background-pick-frame { cursor: crosshair; touch-action: none; user-select: none; } .background-pick-frame > img { display: block; width: 100%; height: 100%; object-fit: contain; pointer-events: none; } .background-pick-marker { position: absolute; z-index: 2; width: 18px; height: 18px; border: 2px solid #fff; border-radius: 50%; box-shadow: 0 0 0 2px #e78f49, 0 1px 5px rgba(0,0,0,.4); transform: translate(-50%, -50%); pointer-events: none; } .ai-actions button:disabled { opacity: .55; cursor: progress; }
+.brush-control-section { display: flex; flex-direction: column; gap: 11px; }
+.brush-control-section .segmented-grid button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
+.brush-interaction { cursor: crosshair; }
+.brush-mask-preview { position: absolute; z-index: 3; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .app-shell.theme-dark .crop-zoom-toolbar { color: #a5afa7; }.app-shell.theme-dark .crop-zoom-toolbar strong { color: #c7e48b; }.app-shell.theme-dark .crop-zoom-toolbar .icon-button { border-color: #3a433d; }
 .preview-stage.is-portrait .main-preview { max-height: 94%; max-width: 78%; } .preview-stage.is-landscape .main-preview { max-width: 94%; max-height: 88%; }
 @media (max-width: 820px) { .crop-handle { width: 26px; height: 26px; border-radius: 6px; } .crop-zoom-toolbar { gap: 7px; } .crop-zoom-toolbar span { min-width: 67px; } .preview-stage.is-portrait { min-height: clamp(330px, 76vw + 80px, 510px); } .preview-stage.is-landscape { min-height: clamp(260px, 48vw + 100px, 390px); } .preview-stage.is-portrait .main-preview { max-width: 88%; } .preview-stage.is-landscape .main-preview { max-height: 88%; } }

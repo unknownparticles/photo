@@ -1,4 +1,4 @@
-import type { ExportFormat, ExportOptions, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, ProcessedAsset, SplitLine, WatermarkOptions } from '../types';
+import type { BackgroundBrushStroke, ExportFormat, ExportOptions, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, ProcessedAsset, SplitLine, WatermarkOptions } from '../types';
 
 const DEFAULT_MAX_EDGE = 8192;
 
@@ -285,7 +285,64 @@ export async function removeBackgroundAsset(asset: ImageAsset, options: LocalBac
   blurAlpha(pixels.data, canvas.width, canvas.height, Math.max(0, Math.min(40, Math.round(options.feather))));
   context.putImageData(pixels, 0, 0);
   const blob = await canvasToBlob(canvas, 'image/png');
-  return createAssetFromBlob(blob, addSuffix(asset.name, '抠图'));
+  const next = await createAssetFromBlob(blob, addSuffix(asset.name, '抠图'));
+  return { ...next, backgroundSourceBlob: asset.backgroundSourceBlob ?? asset.blob };
+}
+
+export async function applyBackgroundBrush(asset: ImageAsset, sourceAsset: ImageAsset, stroke: BackgroundBrushStroke) {
+  const image = await loadImage(asset.blob);
+  const sourceImage = await loadImage(sourceAsset.blob);
+  const size = canvasSize(image.naturalWidth, image.naturalHeight);
+  const canvas = document.createElement('canvas');
+  canvas.width = size.width;
+  canvas.height = size.height;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('当前浏览器无法创建画布');
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+  const points = stroke.points
+    .map((point) => ({
+      x: Math.max(0, Math.min(100, point.x)) / 100 * canvas.width,
+      y: Math.max(0, Math.min(100, point.y)) / 100 * canvas.height,
+    }))
+    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  if (!points.length) return asset;
+
+  const brushSize = Math.max(1, Math.min(Math.max(canvas.width, canvas.height), stroke.size * size.scale));
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = canvas.width;
+  maskCanvas.height = canvas.height;
+  const maskContext = maskCanvas.getContext('2d');
+  if (!maskContext) throw new Error('当前浏览器无法创建画布');
+  maskContext.strokeStyle = '#ffffff';
+  maskContext.lineWidth = brushSize;
+  maskContext.lineCap = 'round';
+  maskContext.lineJoin = 'round';
+  maskContext.beginPath();
+  maskContext.moveTo(points[0].x, points[0].y);
+  points.slice(1).forEach((point) => maskContext.lineTo(point.x, point.y));
+  maskContext.stroke();
+
+  if (stroke.mode === 'erase') {
+    context.save();
+    context.globalCompositeOperation = 'destination-out';
+    context.drawImage(maskCanvas, 0, 0);
+    context.restore();
+  } else {
+    const restoreCanvas = document.createElement('canvas');
+    restoreCanvas.width = canvas.width;
+    restoreCanvas.height = canvas.height;
+    const restoreContext = restoreCanvas.getContext('2d');
+    if (!restoreContext) throw new Error('当前浏览器无法创建画布');
+    restoreContext.drawImage(sourceImage, 0, 0, canvas.width, canvas.height);
+    restoreContext.globalCompositeOperation = 'destination-in';
+    restoreContext.drawImage(maskCanvas, 0, 0);
+    context.drawImage(restoreCanvas, 0, 0);
+  }
+
+  const blob = await canvasToBlob(canvas, 'image/png');
+  const next = await createAssetFromBlob(blob, addSuffix(asset.name, stroke.mode === 'erase' ? '擦除' : '还原'));
+  return { ...next, backgroundSourceBlob: sourceAsset.backgroundSourceBlob ?? sourceAsset.blob };
 }
 
 export async function applyWatermark(asset: ImageAsset, options: WatermarkOptions) {

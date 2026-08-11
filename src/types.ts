@@ -28,6 +28,7 @@ export interface ImageAsset {
   url: string;
   sourceFile?: File;
   metadata?: Record<string, unknown>;
+  backgroundSourceBlob?: Blob;
 }
 
 export interface ProcessedAsset extends ImageAsset {
@@ -67,6 +68,19 @@ export interface LocalBackgroundRemovalOptions {
   seedY: number;
   tolerance: number;
   feather: number;
+}
+
+export type BackgroundBrushMode = 'erase' | 'restore';
+
+export interface BackgroundBrushPoint {
+  x: number;
+  y: number;
+}
+
+export interface BackgroundBrushStroke {
+  mode: BackgroundBrushMode;
+  size: number;
+  points: BackgroundBrushPoint[];
 }
 
 export interface ExportOptions {
