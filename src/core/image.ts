@@ -198,6 +198,15 @@ export async function applyAdjustments(asset: ImageAsset, values: { brightness: 
   return createAssetFromBlob(blob, addSuffix(asset.name, '编辑'));
 }
 
+export async function applyLocalAiFallback(asset: ImageAsset, task: 'upscale' | 'enhance' | 'denoise', scale = 2) {
+  if (task === 'upscale') {
+    const factor = scale === 4 ? 4 : 2;
+    return resizeAsset(asset, asset.width * factor, asset.height * factor, `本地超分${factor}倍`);
+  }
+  if (task === 'enhance') return applyAdjustments(asset, { brightness: 2, contrast: 12, saturation: 8, blur: 0 });
+  return applyAdjustments(asset, { brightness: 0, contrast: 4, saturation: 0, blur: 1 });
+}
+
 function colorDistance(red: number, green: number, blue: number, target: [number, number, number]) {
   const redDelta = red - target[0];
   const greenDelta = green - target[1];

@@ -55,12 +55,13 @@ import {
   exportImage,
   readImageMetadata,
   removeBackgroundAsset,
+  applyLocalAiFallback,
   resizeAsset,
   splitAsset,
   updateImageMetadata,
 } from './core/image';
 import { useAppStore } from './store';
-import type { AiCapability, ExportFormat, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
+import type { AiCapability, AiModelId, AiRequest, AiTask, ExportFormat, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
 import { DirectCropPanel, DirectSplitPanel } from './components/DirectImageControls';
 
 type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
@@ -81,7 +82,7 @@ const tools: ToolDefinition[] = [
   { id: 'merge', label: '拼图', description: '多图自由合并', icon: Combine, category: '基础处理', accent: 'pink' },
   { id: 'compress', label: '压缩', description: '更小体积交付', icon: Gauge, category: '基础处理', accent: 'teal' },
   { id: 'convert', label: '格式', description: 'JPG / PNG / WebP', icon: ArrowRightLeft, category: '基础处理', accent: 'violet' },
-  { id: 'ai', label: 'AI 工具', description: '本地模型增强', icon: Sparkles, category: '智能工具', accent: 'yellow' },
+  { id: 'ai', label: 'AI 工具', description: '抠图、超分与增强', icon: Sparkles, category: '智能工具', accent: 'yellow' },
   { id: 'edit', label: '编辑', description: '色彩与滤镜', icon: SlidersHorizontal, category: '基础处理', accent: 'blue' },
   { id: 'watermark', label: '水印', description: '文字与图片标记', icon: Droplets, category: '工作流', accent: 'cyan' },
   { id: 'metadata', label: '信息', description: 'EXIF 与隐私', icon: ShieldCheck, category: '工作流', accent: 'green' },
@@ -105,6 +106,20 @@ const formatOptions: Array<{ label: string; value: ExportFormat }> = [
 ];
 
 const metadataFields = [['Make', '制造商'], ['Model', '相机型号'], ['ImageDescription', '图片描述'], ['Artist', '作者'], ['Copyright', '版权'], ['DateTimeOriginal', '拍摄时间'], ['GPSLatitude', '纬度'], ['GPSLongitude', '经度']] as const;
+
+const aiTasks: Array<{ id: AiTask; label: string; description: string; icon: LucideIcon }> = [
+  { id: 'remove-background', label: 'AI 抠图', description: '主体与背景分离', icon: WandSparkles },
+  { id: 'upscale', label: 'AI 超分', description: '放大并恢复细节', icon: Maximize2 },
+  { id: 'enhance', label: 'AI 增强', description: '自动优化色彩', icon: Sparkles },
+  { id: 'denoise', label: 'AI 去噪', description: '降低颗粒与噪点', icon: Droplets },
+];
+
+const aiTaskLabels = Object.fromEntries(aiTasks.map((task) => [task.id, task.label])) as Record<AiTask, string>;
+
+function aiModelId(task: AiTask, scale = 2): AiModelId {
+  if (task === 'upscale') return scale === 4 ? 'upscale-4x' : 'upscale-2x';
+  return task;
+}
 
 function operation(type: string, params: Record<string, unknown>): ImageOperation {
   return { id: crypto.randomUUID(), type, params, createdAt: Date.now() };
@@ -225,20 +240,28 @@ function App() {
     await replaceActive(await applyAdjustments(activeAsset, values), '图片编辑', '色彩调整');
   }
 
-  async function applyBackgroundRemoval(options: LocalBackgroundRemovalOptions | { mode: 'ai' }) {
+  async function applyAi(request: LocalBackgroundRemovalOptions | AiRequest) {
     if (!activeAsset) return;
-    if ('mode' in options && options.mode === 'ai') {
+    if ('method' in request) {
+      const next = await removeBackgroundAsset(activeAsset, request);
+      await replaceActive(next, '本地抠图', request.method === 'solid' ? '纯色批量抠除' : '联通色块抠除');
+      return;
+    }
+    if (request.mode === 'model') {
       try {
-        const next = await aiAdapter.run(activeAsset, { modelId: 'remove-background' });
-        await replaceActive(next, 'AI 抠图', '本地模型');
+        const next = await aiAdapter.run(activeAsset, { modelId: aiModelId(request.task, request.scale), scale: request.scale });
+        await replaceActive(next, aiTaskLabels[request.task], `本地模型 · ${request.task === 'upscale' ? `${request.scale ?? 2} 倍` : '按模型输出'}`);
       } catch (error) {
-        setNotice({ type: 'warning', text: error instanceof Error ? error.message : 'AI 抠图暂不可用，请切换纯本地方案' });
+        setNotice({ type: 'warning', text: error instanceof Error ? error.message : 'AI 模型暂不可用，请使用本地降级处理' });
       }
       return;
     }
-    const localOptions = options as LocalBackgroundRemovalOptions;
-    const next = await removeBackgroundAsset(activeAsset, localOptions);
-    await replaceActive(next, '本地抠图', localOptions.method === 'solid' ? '纯色批量抠除' : '联通色块抠除');
+    try {
+      const next = await applyLocalAiFallback(activeAsset, request.task, request.scale);
+      await replaceActive(next, `${aiTaskLabels[request.task]}（本地降级）`, '未加载模型，使用浏览器处理');
+    } catch (error) {
+      setNotice({ type: 'error', text: error instanceof Error ? error.message : '本地降级处理失败' });
+    }
   }
 
   async function applyWatermarkValue(options: WatermarkOptions) {
@@ -419,7 +442,7 @@ function App() {
           onMerge={applyMerge}
           onEncode={applyEncoding}
           onEdit={applyEdit}
-          onBackgroundRemoval={applyBackgroundRemoval}
+          onAiApply={applyAi}
           onWatermark={applyWatermarkValue}
           onMetadata={applyMetadataValue}
           onClearMetadata={clearMetadataValue}
@@ -521,7 +544,7 @@ function Workspace({
   onMerge,
   onEncode,
   onEdit,
-  onBackgroundRemoval,
+  onAiApply,
   onWatermark,
   onMetadata,
   onClearMetadata,
@@ -544,7 +567,7 @@ function Workspace({
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
   onEdit: (values: { brightness: number; contrast: number; saturation: number; blur: number }) => Promise<void>;
-  onBackgroundRemoval: (options: LocalBackgroundRemovalOptions | { mode: 'ai' }) => Promise<void>;
+  onAiApply: (request: LocalBackgroundRemovalOptions | AiRequest) => Promise<void>;
   onWatermark: (options: WatermarkOptions) => Promise<void>;
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
@@ -561,13 +584,13 @@ function Workspace({
       <div className="workspace-layout">
         <aside className="tool-sidebar"><div className="sidebar-title"><PanelLeft size={15} /><span>工具</span></div><div className="sidebar-list">{tools.map((tool) => { const ToolIcon = tool.icon; return <button className={`sidebar-tool ${activeTool === tool.id ? 'is-active' : ''}`} key={tool.id} onClick={() => onSelectTool(tool.id)} title={tool.description}><ToolIcon size={17} /><span>{tool.label}</span>{activeTool === tool.id && <span className="active-bar" />}</button>; })}</div><div className="sidebar-bottom"><ShieldCheck size={16} /><small>本地模式<br />Local only</small></div></aside>
         <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 实时预览</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <img className="main-preview" src={activeAsset.url} alt={activeAsset.name} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="删除全部" onClick={onClear}><Trash2 size={16} /></button></div></div></section>
-        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onBackgroundRemoval={onBackgroundRemoval} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
+        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onAiApply={onAiApply} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
       </div>
     </main>
   );
 }
 
-function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, onEncode, onEdit, onBackgroundRemoval, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, setNotice }: {
+function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, onEncode, onEdit, onAiApply, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, setNotice }: {
   tool: ToolId;
   asset: ImageAsset | null;
   assets: ImageAsset[];
@@ -577,7 +600,7 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, on
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
   onEdit: (values: { brightness: number; contrast: number; saturation: number; blur: number }) => Promise<void>;
-  onBackgroundRemoval: (options: LocalBackgroundRemovalOptions | { mode: 'ai' }) => Promise<void>;
+  onAiApply: (request: LocalBackgroundRemovalOptions | AiRequest) => Promise<void>;
   onWatermark: (options: WatermarkOptions) => Promise<void>;
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
@@ -598,7 +621,7 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, on
     case 'metadata': return <MetadataPanel asset={asset} onApply={onMetadata} onClear={onClearMetadata} setNotice={setNotice} />;
     case 'batch': return <BatchPanel count={assets.length} onApply={onBatch} />;
     case 'gif': return <GifPanel count={assets.length} onApply={onExportGif} />;
-    case 'ai': return <AiPanel asset={asset} onApply={onBackgroundRemoval} setNotice={setNotice} />;
+    case 'ai': return <AiPanel asset={asset} onApply={onAiApply} setNotice={setNotice} />;
     case 'id-photo': return <IdPhotoPanel asset={asset} onApply={onCrop} />;
     default: return <EmptyPanel />;
   }
@@ -762,11 +785,13 @@ function rgbToHex(color: [number, number, number]) {
   return `#${color.map((value) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, '0')).join('')}`;
 }
 
-function AiPanel({ asset, onApply, setNotice }: { asset: ImageAsset; onApply: (options: LocalBackgroundRemovalOptions | { mode: 'ai' }) => Promise<void>; setNotice: (notice: Notice) => void }) {
-  const [mode, setMode] = useState<'ai' | 'local'>('local');
+function AiPanel({ asset, onApply, setNotice }: { asset: ImageAsset; onApply: (request: LocalBackgroundRemovalOptions | AiRequest) => Promise<void>; setNotice: (notice: Notice) => void }) {
+  const [mode, setMode] = useState<'model' | 'local'>('model');
+  const [task, setTask] = useState<AiTask>('remove-background');
   const [method, setMethod] = useState<'solid' | 'connected'>('solid');
   const [capability, setCapability] = useState<AiCapability | null>(null);
   const [loading, setLoading] = useState(false);
+  const [scale, setScale] = useState<2 | 4>(2);
   const [targetColor, setTargetColor] = useState<[number, number, number]>([255, 255, 255]);
   const [seed, setSeed] = useState({ x: 50, y: 50 });
   const [tolerance, setTolerance] = useState(18);
@@ -774,18 +799,22 @@ function AiPanel({ asset, onApply, setNotice }: { asset: ImageAsset; onApply: (o
   const frameRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
 
-  useEffect(() => setSeed({ x: 50, y: 50 }), [asset.id]);
+  useEffect(() => {
+    setSeed({ x: 50, y: 50 });
+    void aiAdapter.capability().then(setCapability);
+  }, [asset.id]);
 
   async function check() {
     setLoading(true);
     try { setCapability(await aiAdapter.capability()); } finally { setLoading(false); }
   }
 
-  async function loadModel(modelId: 'upscale-2x' | 'upscale-4x' | 'remove-background' | 'enhance') {
+  async function loadModel(taskId: AiTask) {
     setLoading(true);
     try {
+      const modelId = aiModelId(taskId, scale);
       await aiAdapter.load(modelId, (value) => setNotice({ type: 'success', text: `模型加载 ${Math.round(value * 100)}%` }));
-      setNotice({ type: 'success', text: '模型文件已找到，可以尝试运行' });
+      setNotice({ type: 'success', text: `${aiTaskLabels[taskId]}模型已加载，可以运行` });
     } catch (error) {
       setNotice({ type: 'warning', text: error instanceof Error ? error.message : '本地模型暂不可用' });
     } finally { setLoading(false); }
@@ -811,14 +840,17 @@ function AiPanel({ asset, onApply, setNotice }: { asset: ImageAsset; onApply: (o
   }
 
   const localOptions: LocalBackgroundRemovalOptions = { method, targetColor, seedX: seed.x, seedY: seed.y, tolerance, feather };
+  const selectedTask = aiTasks.find((item) => item.id === task) ?? aiTasks[0];
   return <>
-    <PanelIntro title="AI 抠图 / 本地抠图" description="AI 模型按需运行；没有模型时，也可在浏览器中按颜色透明化。" />
-    <div className="control-section"><div className="segmented-grid two"><button className={mode === 'ai' ? 'is-selected' : ''} onClick={() => setMode('ai')}><WandSparkles size={13} /> AI 抠图</button><button className={mode === 'local' ? 'is-selected' : ''} onClick={() => setMode('local')}><SlidersHorizontal size={13} /> 纯本地</button></div></div>
-    {mode === 'ai' ? <>
-      <div className="ai-status"><div className={`ai-orb ${capability?.runtime === 'unavailable' ? 'is-muted' : ''}`}><WandSparkles size={22} /></div><div><strong>{capability ? capability.runtime === 'webgpu' ? 'WebGPU 优先' : capability.runtime === 'wasm' ? 'WASM 降级模式' : '设备不支持' : '检查本机能力'}</strong><small>{capability?.modelConfigured ? '模型目录已配置，按需加载' : '未检测到模型文件'}</small></div><button className="icon-button" title="检测能力" onClick={() => void check()} disabled={loading}><RotateCcw size={15} /></button></div>
-      <div className="ai-actions"><button onClick={() => void loadModel('remove-background')} disabled={loading}><WandSparkles size={17} /><span><strong>准备 AI 抠图模型</strong><small>WebGPU 优先，WASM 降级</small></span><ChevronDown size={15} /></button></div>
-      <div className="inline-info"><Info size={16} /><span>模型缺失或推理图未配置时不会上传图片，请切换到纯本地模式完成处理。</span></div>
-      <ApplyButton onClick={() => void onApply({ mode: 'ai' })} label="运行 AI 抠图" />
+    <PanelIntro title="AI 图片增强" description="AI 模型按需运行，支持抠图、超分、增强和去噪；图片始终留在本机。" />
+    <div className="control-section"><div className="segmented-grid two"><button className={mode === 'model' ? 'is-selected' : ''} onClick={() => setMode('model')}><WandSparkles size={13} /> AI 能力</button><button className={mode === 'local' ? 'is-selected' : ''} onClick={() => setMode('local')}><SlidersHorizontal size={13} /> 纯本地抠图</button></div></div>
+    {mode === 'model' ? <>
+      <div className="control-section"><div className="section-label">选择 AI 能力</div><div className="ai-task-grid">{aiTasks.map((item) => { const TaskIcon = item.icon; return <button key={item.id} className={`ai-task-card ${task === item.id ? 'is-selected' : ''}`} onClick={() => setTask(item.id)}><TaskIcon size={16} /><span><strong>{item.label}</strong><small>{item.description}</small></span></button>; })}</div></div>
+      <div className="ai-status"><div className={`ai-orb ${capability?.runtime === 'unavailable' ? 'is-muted' : ''}`}><WandSparkles size={22} /></div><div><strong>{capability ? capability.runtime === 'webgpu' ? 'WebGPU 优先' : capability.runtime === 'wasm' ? 'WASM 降级模式' : '设备不支持' : '检查本机能力'}</strong><small>{capability?.modelConfigured ? '模型目录已配置，按需加载' : '模型目录待配置或检查'}</small></div><button className="icon-button" title="检测能力" onClick={() => void check()} disabled={loading}><RotateCcw size={15} /></button></div>
+      {task === 'upscale' && <div className="control-section"><div className="section-label">放大倍率</div><div className="segmented-grid two"><button className={scale === 2 ? 'is-selected' : ''} onClick={() => setScale(2)}>2 倍</button><button className={scale === 4 ? 'is-selected' : ''} onClick={() => setScale(4)}>4 倍</button></div></div>}
+      <div className="ai-actions"><button onClick={() => void loadModel(task)} disabled={loading}><WandSparkles size={17} /><span><strong>准备 {selectedTask.label} 模型</strong><small>WebGPU 优先，WASM 降级</small></span><ChevronDown size={15} /></button>{task !== 'remove-background' && <button className="ai-fallback-button" onClick={() => void onApply({ mode: 'local-fallback', task, scale })} disabled={loading}><SlidersHorizontal size={17} /><span><strong>使用本地降级处理</strong><small>无需模型，立即在浏览器完成</small></span><ChevronDown size={15} /></button>}</div>
+      <div className="inline-info"><Info size={16} /><span>模型缺失或设备不支持时，不会上传图片；超分、增强和去噪可直接使用本地降级方案。</span></div>
+      <ApplyButton onClick={() => void onApply({ mode: 'model', task, scale })} label={`运行 ${selectedTask.label}`} />
     </> : <>
       <div className="control-section"><div className="segmented-grid two"><button className={method === 'solid' ? 'is-selected' : ''} onClick={() => setMethod('solid')}>纯色批量抠除</button><button className={method === 'connected' ? 'is-selected' : ''} onClick={() => setMethod('connected')}>联通色块抠除</button></div></div>
       <div className="control-section direct-tool-section"><div className="direct-image-frame background-pick-frame" ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerDown={(event) => void pickColor(event)}><img ref={imageRef} src={asset.url} alt="点击取样抠图颜色" />{<span className="background-pick-marker" style={{ left: `${seed.x}%`, top: `${seed.y}%` }} />}</div><div className="direct-tool-caption"><span>点击图片取样颜色和起点</span><span>{method === 'solid' ? '全图匹配' : '仅联通区域'}</span></div></div>
