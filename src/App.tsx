@@ -37,9 +37,11 @@ import {
   Split,
   Sun,
   Trash2,
+  Undo2,
   UploadCloud,
   WandSparkles,
   X,
+  Redo2,
 } from 'lucide-react';
 import { aiAdapter } from './core/ai';
 import {
@@ -161,8 +163,15 @@ function App() {
     addOperation,
     addHistory,
     clearHistory,
+    checkpoint,
+    undo,
+    redo,
+    undoStack,
+    redoStack,
   } = useAppStore();
   const activeAsset = assets.find((asset) => asset.id === activeAssetId) ?? assets[0] ?? null;
+  const canUndo = undoStack.length > 0;
+  const canRedo = redoStack.length > 0;
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -185,6 +194,7 @@ function App() {
     }
     try {
       const loaded = (await Promise.all(imageFiles.map(fileToAsset))).filter((asset): asset is ImageAsset => Boolean(asset));
+      checkpoint();
       addAssets(loaded);
       setNotice({ type: 'success', text: `${source}导入 ${loaded.length} 张图片，文件仍只在本机处理` });
       if (!activeTool) setActiveTool('resize');
@@ -205,7 +215,8 @@ function App() {
   }
 
   function clearAssets() {
-    assets.forEach((asset) => URL.revokeObjectURL(asset.url));
+    if (!assets.length) return;
+    checkpoint();
     replaceAssets([]);
     setActiveTool(null);
     setNotice(null);
@@ -217,7 +228,7 @@ function App() {
     const wasActive = activeAsset?.id === id;
     const targetIndex = assets.findIndex((asset) => asset.id === id);
     const remaining = assets.filter((asset) => asset.id !== id);
-    URL.revokeObjectURL(target.url);
+    checkpoint();
     replaceAssets(remaining);
     const nextActive = wasActive
       ? remaining[Math.min(targetIndex, remaining.length - 1)]
@@ -234,7 +245,7 @@ function App() {
 
   async function replaceActive(next: ImageAsset, label: string, detail: string) {
     if (!activeAsset) return;
-    URL.revokeObjectURL(activeAsset.url);
+    checkpoint();
     replaceAssets(assets.map((asset) => (asset.id === activeAsset.id ? next : asset)));
     setActiveAsset(next.id);
     addOperation(operation(label, { detail }));
@@ -336,6 +347,7 @@ function App() {
   async function applySplit(direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines: SplitLine[] = []) {
     if (!activeAsset) return;
     const pieces = await splitAsset(activeAsset, rows, columns, direction, lines);
+    checkpoint();
     addAssets(pieces);
     setActiveAsset(pieces[0]?.id ?? activeAsset.id);
     addHistory({ name: activeAsset.name, label: '分割图片', detail: `${pieces.length} 张` });
@@ -348,6 +360,7 @@ function App() {
       return;
     }
     const merged = await createCollage(assets, layout, gap, background);
+    checkpoint();
     addAssets([merged]);
     setActiveAsset(merged.id);
     addHistory({ name: merged.name, label: '图片拼图', detail: `${assets.length} 张图片` });
@@ -400,7 +413,7 @@ function App() {
         nextAssets.push(await createAssetFromBlob(blob, `${fileNameWithoutExtension(asset.name)}.webp`));
       }
     }
-    assets.forEach((asset) => URL.revokeObjectURL(asset.url));
+    checkpoint();
     replaceAssets(nextAssets);
     addHistory({ name: `${assets.length} 张图片`, label: '批量处理', detail: kind === 'resize' ? '最长边 1920 px' : 'WebP 质量 85' });
     setNotice({ type: 'success', text: `批量处理完成，共 ${nextAssets.length} 张` });
@@ -466,6 +479,10 @@ function App() {
           onExportGif={exportGif}
           onBatch={applyBatch}
           onDeleteAsset={deleteAsset}
+          onUndo={() => { undo(); setNotice({ type: 'success', text: '已撤销上一步操作' }); }}
+          onRedo={() => { redo(); setNotice({ type: 'success', text: '已重做上一步操作' }); }}
+          canUndo={canUndo}
+          canRedo={canRedo}
           setNotice={setNotice}
         />
       )}
@@ -569,6 +586,10 @@ function Workspace({
   onExportGif,
   onBatch,
   onDeleteAsset,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo,
   setNotice,
 }: {
   assets: ImageAsset[];
@@ -593,6 +614,10 @@ function Workspace({
   onExportGif: () => Promise<void>;
   onBatch: (kind: 'resize' | 'webp') => Promise<void>;
   onDeleteAsset: (id: string) => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
   setNotice: (notice: Notice) => void;
 }) {
   const activeToolDefinition = tools.find((tool) => tool.id === activeTool) ?? tools[0];
@@ -603,7 +628,7 @@ function Workspace({
       <div className="asset-strip"><div className="asset-strip-label"><span className="eyebrow">WORKSPACE</span><strong>{assets.length} 张图片</strong></div><div className="asset-thumbs">{assets.map((asset, index) => <div className="asset-thumb-wrap" key={asset.id}><button className={`asset-thumb ${asset.id === activeAsset?.id ? 'is-active' : ''}`} aria-label={`选中 ${asset.name}`} aria-pressed={asset.id === activeAsset?.id} onClick={() => onSelectAsset(asset.id)}><img src={asset.url} alt={asset.name} /><span>{index + 1}</span></button><button className="asset-delete-button" title={`删除 ${asset.name}`} aria-label={`删除 ${asset.name}`} onClick={() => onDeleteAsset(asset.id)}><X size={11} /></button></div>)}<button className="add-thumb" title="添加图片" aria-label="添加图片" onClick={onAddFiles}><Plus size={17} /></button></div><div className="asset-total">总计 {formatBytes(assets.reduce((sum, asset) => sum + asset.size, 0))}</div></div>
       <div className="workspace-layout">
         <aside className="tool-sidebar"><div className="sidebar-title"><PanelLeft size={15} /><span>工具</span></div><div className="sidebar-list">{tools.map((tool) => { const ToolIcon = tool.icon; return <button className={`sidebar-tool ${activeTool === tool.id ? 'is-active' : ''}`} key={tool.id} onClick={() => onSelectTool(tool.id)} title={tool.description}><ToolIcon size={17} /><span>{tool.label}</span>{activeTool === tool.id && <span className="active-bar" />}</button>; })}</div><div className="sidebar-bottom"><ShieldCheck size={16} /><small>本地模式<br />Local only</small></div></aside>
-        <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 实时预览</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <img className="main-preview" src={activeAsset.url} alt={activeAsset.name} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button>{activeAsset && <button className="icon-button" title="删除当前图片" aria-label="删除当前图片" onClick={() => onDeleteAsset(activeAsset.id)}><Trash2 size={16} /></button>}<button className="icon-button" title="删除全部图片" aria-label="删除全部图片" onClick={onClear}><Trash2 size={16} /></button></div></div></section>
+        <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 实时预览</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <img className="main-preview" src={activeAsset.url} alt={activeAsset.name} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeAsset && <button className="icon-button" title="删除当前图片" aria-label="删除当前图片" onClick={() => onDeleteAsset(activeAsset.id)}><Trash2 size={16} /></button>}</div></div></section>
         <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onAiApply={onAiApply} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
       </div>
     </main>
