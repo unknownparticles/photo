@@ -419,7 +419,7 @@ function App() {
     setNotice({ type: 'success', text: `批量处理完成，共 ${nextAssets.length} 张` });
   }
 
-  const pageClass = `app-shell ${theme === 'dark' ? 'theme-dark' : ''}`;
+  const pageClass = `app-shell ${theme === 'dark' ? 'theme-dark' : ''} ${assets.length ? 'has-workspace' : ''}`;
 
   return (
     <div className={pageClass}>
