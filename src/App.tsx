@@ -236,6 +236,7 @@ function App() {
     if (!activeAsset) return;
     URL.revokeObjectURL(activeAsset.url);
     replaceAssets(assets.map((asset) => (asset.id === activeAsset.id ? next : asset)));
+    setActiveAsset(next.id);
     addOperation(operation(label, { detail }));
     addHistory({ name: activeAsset.name, label, detail });
     setNotice({ type: 'success', text: `${label}完成` });
