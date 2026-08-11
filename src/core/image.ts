@@ -129,23 +129,30 @@ export async function splitAsset(asset: ImageAsset, rows: number, columns: numbe
 export async function createCollage(assets: ImageAsset[], layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) {
   if (!assets.length) throw new Error('至少需要一张图片');
   const images = await Promise.all(assets.map((asset) => loadImage(asset.blob)));
+  const safeGap = Math.max(0, Math.round(gap));
+  const sameSize = images.every((image) => image.naturalWidth === images[0].naturalWidth && image.naturalHeight === images[0].naturalHeight);
+  if (layout === 'grid' && !sameSize) throw new Error('网格拼图要求所有图片尺寸一致');
   const columns = layout === 'horizontal' ? assets.length : layout === 'vertical' ? 1 : Math.ceil(Math.sqrt(assets.length));
   const rows = layout === 'vertical' ? assets.length : layout === 'horizontal' ? 1 : Math.ceil(assets.length / columns);
-  const cellWidth = Math.max(...images.map((image) => image.naturalWidth));
-  const cellHeight = Math.max(...images.map((image) => image.naturalHeight));
+  const cellWidth = layout === 'grid' ? images[0].naturalWidth : Math.max(...images.map((image) => image.naturalWidth));
+  const cellHeight = layout === 'grid' ? images[0].naturalHeight : Math.max(...images.map((image) => image.naturalHeight));
   const canvas = document.createElement('canvas');
-  canvas.width = cellWidth * columns + gap * (columns - 1);
-  canvas.height = cellHeight * rows + gap * (rows - 1);
+  canvas.width = layout === 'horizontal' ? images.reduce((sum, image) => sum + image.naturalWidth, 0) + safeGap * (images.length - 1) : layout === 'vertical' ? cellWidth : cellWidth * columns + safeGap * (columns - 1);
+  canvas.height = layout === 'vertical' ? images.reduce((sum, image) => sum + image.naturalHeight, 0) + safeGap * (images.length - 1) : layout === 'horizontal' ? cellHeight : cellHeight * rows + safeGap * (rows - 1);
   const context = canvas.getContext('2d');
   if (!context) throw new Error('当前浏览器无法创建画布');
   context.fillStyle = background;
   context.fillRect(0, 0, canvas.width, canvas.height);
-  images.forEach((image, index) => {
+  if (layout === 'horizontal') {
+    let x = 0;
+    images.forEach((image) => { context.drawImage(image, x, 0); x += image.naturalWidth + safeGap; });
+  } else if (layout === 'vertical') {
+    let y = 0;
+    images.forEach((image) => { context.drawImage(image, 0, y); y += image.naturalHeight + safeGap; });
+  } else images.forEach((image, index) => {
     const column = index % columns;
     const row = Math.floor(index / columns);
-    const x = column * (cellWidth + gap) + (cellWidth - image.naturalWidth) / 2;
-    const y = row * (cellHeight + gap) + (cellHeight - image.naturalHeight) / 2;
-    context.drawImage(image, x, y);
+    context.drawImage(image, column * (cellWidth + safeGap), row * (cellHeight + safeGap));
   });
   const blob = await canvasToBlob(canvas, 'image/png');
   return createAssetFromBlob(blob, `拼图-${new Date().toISOString().slice(0, 10)}.png`);

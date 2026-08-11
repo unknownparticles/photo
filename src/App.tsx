@@ -590,7 +590,7 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, on
     case 'resize': return <ResizePanel asset={asset} onApply={onResize} />;
     case 'crop': return <CropPanel asset={asset} onApply={onCrop} />;
     case 'split': return <SplitPanel asset={asset} onApply={onSplit} />;
-    case 'merge': return <MergePanel count={assets.length} onApply={onMerge} />;
+    case 'merge': return <MergePanel assets={assets} onApply={onMerge} setNotice={setNotice} />;
     case 'compress': return <EncodePanel mode="compress" asset={asset} onApply={onEncode} />;
     case 'convert': return <EncodePanel mode="convert" asset={asset} onApply={onEncode} />;
     case 'edit': return <EditPanel onApply={onEdit} />;
@@ -624,11 +624,27 @@ function SplitPanel({ asset, onApply }: { asset: ImageAsset; onApply: (direction
   return <DirectSplitPanel asset={asset} onApply={onApply} />;
 }
 
-function MergePanel({ count, onApply }: { count: number; onApply: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void> }) {
-  const [layout, setLayout] = useState<'horizontal' | 'vertical' | 'grid'>('grid');
+function MergePanel({ assets, onApply, setNotice }: { assets: ImageAsset[]; onApply: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>; setNotice: (notice: Notice) => void }) {
+  const count = assets.length;
+  const sameSize = assets.length > 0 && assets.every((asset) => asset.width === assets[0].width && asset.height === assets[0].height);
+  const [layout, setLayout] = useState<'horizontal' | 'vertical' | 'grid'>(sameSize ? 'grid' : 'horizontal');
   const [gap, setGap] = useState(16);
   const [background, setBackground] = useState('#ffffff');
-  return <><PanelIntro title="合并与拼图" description="把当前工作区里的图片组合成一张新画布。" /><div className="inline-info"><Layers3 size={16} /><span>当前工作区 <strong>{count} 张图片</strong></span></div><div className="control-section"><div className="section-label">布局</div><div className="segmented-grid three"><button className={layout === 'horizontal' ? 'is-selected' : ''} onClick={() => setLayout('horizontal')}>横向</button><button className={layout === 'vertical' ? 'is-selected' : ''} onClick={() => setLayout('vertical')}>纵向</button><button className={layout === 'grid' ? 'is-selected' : ''} onClick={() => setLayout('grid')}>网格</button></div></div><div className="control-section"><Field label="图片间距" suffix="px"><input type="number" min="0" max="200" value={gap} onChange={(event) => setGap(Number(event.target.value))} /></Field><div className="color-field"><span>背景颜色</span><label><input type="color" value={background} onChange={(event) => setBackground(event.target.value)} /><b>{background.toUpperCase()}</b></label></div></div><ApplyButton onClick={() => void onApply(layout, gap, background)} label="生成拼图" /></>;
+  function chooseLayout(next: 'horizontal' | 'vertical' | 'grid') {
+    if (next === 'grid' && !sameSize) {
+      setNotice({ type: 'warning', text: '网格拼图要求所有图片尺寸一致，请先统一图片大小' });
+      return;
+    }
+    setLayout(next);
+  }
+  function apply() {
+    if (layout === 'grid' && !sameSize) {
+      setNotice({ type: 'warning', text: '网格拼图要求所有图片尺寸一致，请先统一图片大小' });
+      return;
+    }
+    void onApply(layout, gap, background);
+  }
+  return <><PanelIntro title="合并与拼图" description="横向和纵向按原图边缘拼接，网格要求所有图片尺寸一致。" /><div className="inline-info"><Layers3 size={16} /><span>当前工作区 <strong>{count} 张图片</strong></span></div>{!sameSize && <div className="inline-info merge-warning"><Info size={16} /><span>当前图片尺寸不同，网格按钮已置灰；横向、纵向仍可直接拼接。</span></div>}<div className="control-section"><div className="section-label">布局</div><div className="segmented-grid three"><button className={layout === 'horizontal' ? 'is-selected' : ''} onClick={() => chooseLayout('horizontal')}>横向</button><button className={layout === 'vertical' ? 'is-selected' : ''} onClick={() => chooseLayout('vertical')}>纵向</button><button className={`${layout === 'grid' ? 'is-selected' : ''} ${!sameSize ? 'is-disabled' : ''}`} aria-disabled={!sameSize} title={!sameSize ? '网格拼图要求所有图片尺寸一致' : '网格拼图'} onClick={() => chooseLayout('grid')}>网格</button></div></div><div className="control-section"><Field label="图片间距" suffix="px"><input type="number" min="0" max="200" value={gap} onChange={(event) => setGap(Number(event.target.value))} /></Field><div className="color-field"><span>背景颜色</span><label><input type="color" value={background} onChange={(event) => setBackground(event.target.value)} /><b>{background.toUpperCase()}</b></label></div></div><ApplyButton onClick={apply} label="生成拼图" /></>;
 }
 
 function EncodePanel({ mode, asset, onApply }: { mode: 'compress' | 'convert'; asset: ImageAsset; onApply: (format: ExportFormat, quality: number, background: string) => Promise<void> }) {
