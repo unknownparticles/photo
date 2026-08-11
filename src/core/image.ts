@@ -217,7 +217,9 @@ export async function encodeGifFrames(assets: ImageAsset[], fps = 8) {
     encoder.writeFrame(index, width, height, { palette, delay: Math.round(1000 / fps) });
   }
   encoder.finish();
-  return new Blob([encoder.bytes()], { type: 'image/gif' });
+  const bytes = encoder.bytes();
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  return new Blob([buffer], { type: 'image/gif' });
 }
 
 export async function exportImage(asset: ProcessedAsset, options: ExportOptions) {
