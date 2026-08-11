@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
-import { Columns3, Combine, Plus } from 'lucide-react';
+import { Columns3, Combine, Plus, RotateCcw } from 'lucide-react';
 import type { ImageAsset, SplitLine } from '../types';
 
 type CropRect = { x: number; y: number; width: number; height: number };
@@ -15,34 +15,118 @@ function pointerInFrame(event: ReactPointerEvent<HTMLElement>, frame: HTMLDivEle
   return { x: ((event.clientX - rect.left) / rect.width) * 100, y: ((event.clientY - rect.top) / rect.height) * 100 };
 }
 
+type CropView = { zoom: number; offsetX: number; offsetY: number };
+type TouchPoint = { x: number; y: number };
+type PinchGesture = { distance: number; centerX: number; centerY: number; zoom: number; offsetX: number; offsetY: number };
+
 export function DirectCropPanel({ asset, onApply }: { asset: ImageAsset; onApply: (values: CropRect) => Promise<void> }) {
   const [values, setValues] = useState<CropRect>({ x: 0, y: 0, width: asset.width, height: asset.height });
   const [ratio, setRatio] = useState<number | null>(null);
   const [locked, setLocked] = useState(true);
+  const [view, setView] = useState<CropView>({ zoom: 1, offsetX: 0, offsetY: 0 });
   const frameRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ mode: 'move' | 'resize'; handle: CropHandle; start: { x: number; y: number }; initial: CropRect } | null>(null);
+  const viewRef = useRef<CropView>({ zoom: 1, offsetX: 0, offsetY: 0 });
+  const touchPointsRef = useRef(new Map<number, TouchPoint>());
+  const pinchRef = useRef<PinchGesture | null>(null);
   const presets = [{ label: '自由', ratio: null }, { label: '1 : 1', ratio: 1 }, { label: '4 : 3', ratio: 4 / 3 }, { label: '3 : 4', ratio: 3 / 4 }, { label: '16 : 9', ratio: 16 / 9 }];
   const handles: CropHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 
   useEffect(() => {
     setValues({ x: 0, y: 0, width: asset.width, height: asset.height });
     setRatio(null);
+    viewRef.current = { zoom: 1, offsetX: 0, offsetY: 0 };
+    setView(viewRef.current);
   }, [asset.id, asset.width, asset.height]);
+
+  function updateView(next: CropView) {
+    viewRef.current = next;
+    setView(next);
+  }
+
+  function constrainView(frame: HTMLDivElement, next: CropView): CropView {
+    const rect = frame.getBoundingClientRect();
+    const zoom = clampValue(next.zoom, 1, 4);
+    const maxOffsetX = (rect.width * (zoom - 1)) / 2;
+    const maxOffsetY = (rect.height * (zoom - 1)) / 2;
+    return { zoom, offsetX: clampValue(next.offsetX, -maxOffsetX, maxOffsetX), offsetY: clampValue(next.offsetY, -maxOffsetY, maxOffsetY) };
+  }
+
+  function pointerInCropSpace(event: ReactPointerEvent<HTMLElement>, frame: HTMLDivElement) {
+    const point = pointerInFrame(event, frame);
+    const current = viewRef.current;
+    return {
+      x: 50 + ((point.x - 50) - (current.offsetX / frame.clientWidth) * 100) / current.zoom,
+      y: 50 + ((point.y - 50) - (current.offsetY / frame.clientHeight) * 100) / current.zoom,
+    };
+  }
+
+  function pinchCenter(frame: HTMLDivElement, first: TouchPoint, second: TouchPoint) {
+    const rect = frame.getBoundingClientRect();
+    return { x: (first.x + second.x) / 2 - rect.left - rect.width / 2, y: (first.y + second.y) / 2 - rect.top - rect.height / 2 };
+  }
+
+  function handlePointerDownCapture(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType !== 'touch') return;
+    const frame = frameRef.current;
+    if (!frame) return;
+    touchPointsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (touchPointsRef.current.size < 2) return;
+    const [first, second] = Array.from(touchPointsRef.current.values());
+    const center = pinchCenter(frame, first, second);
+    pinchRef.current = {
+      distance: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
+      centerX: center.x,
+      centerY: center.y,
+      zoom: viewRef.current.zoom,
+      offsetX: viewRef.current.offsetX,
+      offsetY: viewRef.current.offsetY,
+    };
+    dragRef.current = null;
+    frame.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+
+  function handlePointerMoveCapture(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType !== 'touch' || !touchPointsRef.current.has(event.pointerId)) return;
+    touchPointsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const gesture = pinchRef.current;
+    const frame = frameRef.current;
+    if (!gesture || !frame || touchPointsRef.current.size < 2) return;
+    const [first, second] = Array.from(touchPointsRef.current.values());
+    const distance = Math.max(1, Math.hypot(second.x - first.x, second.y - first.y));
+    const center = pinchCenter(frame, first, second);
+    const zoom = clampValue(gesture.zoom * (distance / gesture.distance), 1, 4);
+    const scale = zoom / gesture.zoom;
+    updateView(constrainView(frame, {
+      zoom,
+      offsetX: center.x - scale * (gesture.centerX - gesture.offsetX),
+      offsetY: center.y - scale * (gesture.centerY - gesture.offsetY),
+    }));
+    event.preventDefault();
+  }
+
+  function handlePointerUpCapture(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.pointerType !== 'touch') return;
+    touchPointsRef.current.delete(event.pointerId);
+    if (touchPointsRef.current.size < 2) pinchRef.current = null;
+  }
 
   function startDrag(event: ReactPointerEvent<HTMLElement>, mode: 'move' | 'resize', handle: CropHandle = 'se') {
     const frame = frameRef.current;
     if (!frame) return;
+    if (pinchRef.current) return;
     event.preventDefault();
     event.stopPropagation();
     frame.setPointerCapture(event.pointerId);
-    dragRef.current = { mode, handle, start: pointerInFrame(event, frame), initial: values };
+    dragRef.current = { mode, handle, start: pointerInCropSpace(event, frame), initial: values };
   }
 
   function moveCrop(event: ReactPointerEvent<HTMLDivElement>) {
     const drag = dragRef.current;
     const frame = frameRef.current;
     if (!drag || !frame) return;
-    const point = pointerInFrame(event, frame);
+    const point = pointerInCropSpace(event, frame);
     const dx = ((point.x - drag.start.x) / 100) * asset.width;
     const dy = ((point.y - drag.start.y) / 100) * asset.height;
     const minimum = Math.min(24, Math.min(asset.width, asset.height));
@@ -92,7 +176,37 @@ export function DirectCropPanel({ asset, onApply }: { asset: ImageAsset; onApply
     dragRef.current = null;
   }
 
-  return <><div className="control-section"><div className="section-label">裁剪比例</div><div className="segmented-grid">{presets.map((preset) => <button key={preset.label} className={preset.ratio && Math.abs(values.width / values.height - preset.ratio) < 0.02 ? 'is-selected' : !preset.ratio && !ratio ? 'is-selected' : ''} onClick={() => { setRatio(preset.ratio); if (!preset.ratio) { setValues({ x: 0, y: 0, width: asset.width, height: asset.height }); return; } const width = Math.min(asset.width, Math.round(asset.height * preset.ratio)); setValues({ x: Math.round((asset.width - width) / 2), y: Math.round((asset.height - width / preset.ratio) / 2), width, height: Math.round(width / preset.ratio) }); }}>{preset.label}</button>)}</div></div><div className="control-section direct-tool-section"><div className="direct-image-frame crop-interaction" ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerMove={moveCrop} onPointerUp={endDrag} onPointerCancel={endDrag}><img src={asset.url} alt="可直接拖动的裁剪预览" /><div className="crop-box" data-crop-box style={{ left: `${(values.x / asset.width) * 100}%`, top: `${(values.y / asset.height) * 100}%`, width: `${(values.width / asset.width) * 100}%`, height: `${(values.height / asset.height) * 100}%` }} onPointerDown={(event) => startDrag(event, 'move')}><span className="crop-grid-line crop-grid-line-v one" /><span className="crop-grid-line crop-grid-line-v two" /><span className="crop-grid-line crop-grid-line-h one" /><span className="crop-grid-line crop-grid-line-h two" />{handles.map((handle) => <button type="button" aria-label={`调整裁剪框 ${handle}`} className={`crop-handle ${handle}`} key={handle} onPointerDown={(event) => startDrag(event, 'resize', handle)} />)}</div></div><div className="direct-tool-caption"><span>拖动边框移动</span><span>拖动角点缩放</span></div></div><div className="control-section"><div className="section-label">裁剪区域 <span className="muted">px</span></div><div className="field-grid">{(['x', 'y', 'width', 'height'] as const).map((key) => <label className="field" key={key}><span>{key === 'x' ? '左' : key === 'y' ? '上' : key === 'width' ? '宽' : '高'}</span><div className="field-control"><input type="number" min="0" value={Math.round(values[key])} onChange={(event) => setValues((current) => ({ ...current, [key]: Number(event.target.value) }))} /></div></label>)}</div><button className={`toggle-row ${locked ? 'is-on' : ''}`} onClick={() => setLocked((value) => !value)}><span className="toggle"><span /></span><span>输入时锁定比例</span></button></div><button className="apply-button" onClick={() => void onApply(values)}>应用裁剪</button></>;
+  function setPreviewZoom(value: number) {
+    const frame = frameRef.current;
+    if (!frame) return;
+    updateView(constrainView(frame, { ...viewRef.current, zoom: value }));
+  }
+
+  return <>
+    <div className="control-section">
+      <div className="section-label">裁剪比例</div>
+      <div className="segmented-grid">{presets.map((preset) => <button key={preset.label} className={preset.ratio && Math.abs(values.width / values.height - preset.ratio) < 0.02 ? 'is-selected' : !preset.ratio && !ratio ? 'is-selected' : ''} onClick={() => { setRatio(preset.ratio); if (!preset.ratio) { setValues({ x: 0, y: 0, width: asset.width, height: asset.height }); return; } const width = Math.min(asset.width, Math.round(asset.height * preset.ratio)); setValues({ x: Math.round((asset.width - width) / 2), y: Math.round((asset.height - width / preset.ratio) / 2), width, height: Math.round(width / preset.ratio) }); }}>{preset.label}</button>)}</div>
+    </div>
+    <div className="control-section direct-tool-section">
+      <div className="crop-zoom-toolbar"><span>预览缩放 <strong>{Math.round(view.zoom * 100)}%</strong></span><input aria-label="裁剪预览缩放" type="range" min="1" max="4" step="0.05" value={view.zoom} onChange={(event) => setPreviewZoom(Number(event.target.value))} /><button className="icon-button" type="button" title="重置裁剪预览缩放" aria-label="重置裁剪预览缩放" onClick={() => setPreviewZoom(1)}><RotateCcw size={14} /></button></div>
+      <div className="direct-image-frame crop-interaction" ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerDownCapture={handlePointerDownCapture} onPointerMoveCapture={handlePointerMoveCapture} onPointerUpCapture={handlePointerUpCapture} onPointerCancelCapture={handlePointerUpCapture} onPointerMove={moveCrop} onPointerUp={endDrag} onPointerCancel={endDrag}>
+        <div className="crop-viewport" style={{ transform: `translate(${view.offsetX}px, ${view.offsetY}px) scale(${view.zoom})` }}>
+          <img src={asset.url} alt="可直接拖动的裁剪预览" />
+          <div className="crop-box" data-crop-box style={{ left: `${(values.x / asset.width) * 100}%`, top: `${(values.y / asset.height) * 100}%`, width: `${(values.width / asset.width) * 100}%`, height: `${(values.height / asset.height) * 100}%` }} onPointerDown={(event) => startDrag(event, 'move')}>
+            <span className="crop-grid-line crop-grid-line-v one" /><span className="crop-grid-line crop-grid-line-v two" /><span className="crop-grid-line crop-grid-line-h one" /><span className="crop-grid-line crop-grid-line-h two" />
+            {handles.map((handle) => <button type="button" aria-label={`调整裁剪框 ${handle}`} className={`crop-handle ${handle}`} key={handle} onPointerDown={(event) => startDrag(event, 'resize', handle)} />)}
+          </div>
+        </div>
+      </div>
+      <div className="direct-tool-caption"><span>拖动边框移动</span><span>双指缩放预览</span></div>
+    </div>
+    <div className="control-section">
+      <div className="section-label">裁剪区域 <span className="muted">px</span></div>
+      <div className="field-grid">{(['x', 'y', 'width', 'height'] as const).map((key) => <label className="field" key={key}><span>{key === 'x' ? '左' : key === 'y' ? '上' : key === 'width' ? '宽' : '高'}</span><div className="field-control"><input type="number" min="0" value={Math.round(values[key])} onChange={(event) => setValues((current) => ({ ...current, [key]: Number(event.target.value) }))} /></div></label>)}</div>
+      <button className={`toggle-row ${locked ? 'is-on' : ''}`} onClick={() => setLocked((value) => !value)}><span className="toggle"><span /></span><span>输入时锁定比例</span></button>
+    </div>
+    <button className="apply-button" onClick={() => void onApply(values)}>应用裁剪</button>
+  </>;
 }
 
 export function DirectSplitPanel({ asset, onApply }: { asset: ImageAsset; onApply: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void> }) {
