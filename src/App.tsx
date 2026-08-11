@@ -691,7 +691,7 @@ function WatermarkPanel({ asset, onApply }: { asset: ImageAsset; onApply: (optio
     setKind('image');
   }
 
-  const options: WatermarkOptions = { kind, text, opacity, position, x, y, width, fontSize: width, image: watermarkImage };
+  const options: WatermarkOptions = { kind, text, opacity, position, x, y, width, fontSize: Math.max(2, Math.min(12, width / 5.6)), image: watermarkImage };
   return <>
     <PanelIntro title="添加水印" description="文字或图片水印都可直接在原图比例画布上拖动和缩放。" />
     <input ref={fileInput} className="visually-hidden" type="file" accept="image/*" onChange={(event) => void chooseWatermark(event.target.files?.[0])} />

@@ -325,13 +325,13 @@ function rational(value: number) {
   return [Math.round(value * denominator), denominator] as const;
 }
 
-function gpsParts(value: MetadataValue) {
+function gpsParts(value: MetadataValue, positiveRef: string, negativeRef: string) {
   if (value === undefined || value === '') return null;
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return null;
   const absolute = Math.abs(numeric);
   return {
-    ref: numeric < 0 ? 'W' : 'E',
+    ref: numeric < 0 ? negativeRef : positiveRef,
     values: [Math.floor(absolute), (absolute % 1) * 60, ((absolute * 60) % 1) * 60],
   };
 }
@@ -350,8 +350,8 @@ function writeExif(metadata: Record<string, unknown>) {
   addAscii(0x8298, 'Copyright');
   addAscii(0x9003, 'DateTimeOriginal');
 
-  const latitude = gpsParts(metadata.GPSLatitude);
-  const longitude = gpsParts(metadata.GPSLongitude);
+  const latitude = gpsParts(metadata.GPSLatitude, 'N', 'S');
+  const longitude = gpsParts(metadata.GPSLongitude, 'E', 'W');
   const hasGps = Boolean(latitude && longitude);
   if (hasGps) entries.push({ tag: 0x8825, type: 4, count: 1, value: 0 });
   entries.sort((a, b) => a.tag - b.tag);
