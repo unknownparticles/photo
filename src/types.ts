@@ -60,6 +60,15 @@ export interface WatermarkOptions {
   image?: ImageAsset;
 }
 
+export interface LocalBackgroundRemovalOptions {
+  method: 'solid' | 'connected';
+  targetColor: [number, number, number];
+  seedX: number;
+  seedY: number;
+  tolerance: number;
+  feather: number;
+}
+
 export interface ExportOptions {
   format: ExportFormat;
   quality: number;

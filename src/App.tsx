@@ -54,12 +54,13 @@ import {
   encodeGifFrames,
   exportImage,
   readImageMetadata,
+  removeBackgroundAsset,
   resizeAsset,
   splitAsset,
   updateImageMetadata,
 } from './core/image';
 import { useAppStore } from './store';
-import type { AiCapability, ExportFormat, ImageAsset, ImageOperation, SplitLine, ToolId, WatermarkOptions } from './types';
+import type { AiCapability, ExportFormat, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
 import { DirectCropPanel, DirectSplitPanel } from './components/DirectImageControls';
 
 type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
@@ -222,6 +223,22 @@ function App() {
   async function applyEdit(values: { brightness: number; contrast: number; saturation: number; blur: number }) {
     if (!activeAsset) return;
     await replaceActive(await applyAdjustments(activeAsset, values), '图片编辑', '色彩调整');
+  }
+
+  async function applyBackgroundRemoval(options: LocalBackgroundRemovalOptions | { mode: 'ai' }) {
+    if (!activeAsset) return;
+    if ('mode' in options && options.mode === 'ai') {
+      try {
+        const next = await aiAdapter.run(activeAsset, { modelId: 'remove-background' });
+        await replaceActive(next, 'AI 抠图', '本地模型');
+      } catch (error) {
+        setNotice({ type: 'warning', text: error instanceof Error ? error.message : 'AI 抠图暂不可用，请切换纯本地方案' });
+      }
+      return;
+    }
+    const localOptions = options as LocalBackgroundRemovalOptions;
+    const next = await removeBackgroundAsset(activeAsset, localOptions);
+    await replaceActive(next, '本地抠图', localOptions.method === 'solid' ? '纯色批量抠除' : '联通色块抠除');
   }
 
   async function applyWatermarkValue(options: WatermarkOptions) {
@@ -402,6 +419,7 @@ function App() {
           onMerge={applyMerge}
           onEncode={applyEncoding}
           onEdit={applyEdit}
+          onBackgroundRemoval={applyBackgroundRemoval}
           onWatermark={applyWatermarkValue}
           onMetadata={applyMetadataValue}
           onClearMetadata={clearMetadataValue}
@@ -503,6 +521,7 @@ function Workspace({
   onMerge,
   onEncode,
   onEdit,
+  onBackgroundRemoval,
   onWatermark,
   onMetadata,
   onClearMetadata,
@@ -525,6 +544,7 @@ function Workspace({
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
   onEdit: (values: { brightness: number; contrast: number; saturation: number; blur: number }) => Promise<void>;
+  onBackgroundRemoval: (options: LocalBackgroundRemovalOptions | { mode: 'ai' }) => Promise<void>;
   onWatermark: (options: WatermarkOptions) => Promise<void>;
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
@@ -541,13 +561,13 @@ function Workspace({
       <div className="workspace-layout">
         <aside className="tool-sidebar"><div className="sidebar-title"><PanelLeft size={15} /><span>工具</span></div><div className="sidebar-list">{tools.map((tool) => { const ToolIcon = tool.icon; return <button className={`sidebar-tool ${activeTool === tool.id ? 'is-active' : ''}`} key={tool.id} onClick={() => onSelectTool(tool.id)} title={tool.description}><ToolIcon size={17} /><span>{tool.label}</span>{activeTool === tool.id && <span className="active-bar" />}</button>; })}</div><div className="sidebar-bottom"><ShieldCheck size={16} /><small>本地模式<br />Local only</small></div></aside>
         <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 实时预览</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <img className="main-preview" src={activeAsset.url} alt={activeAsset.name} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="删除全部" onClick={onClear}><Trash2 size={16} /></button></div></div></section>
-        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
+        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onBackgroundRemoval={onBackgroundRemoval} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
       </div>
     </main>
   );
 }
 
-function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, onEncode, onEdit, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, setNotice }: {
+function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, onEncode, onEdit, onBackgroundRemoval, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, setNotice }: {
   tool: ToolId;
   asset: ImageAsset | null;
   assets: ImageAsset[];
@@ -557,6 +577,7 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, on
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
   onEdit: (values: { brightness: number; contrast: number; saturation: number; blur: number }) => Promise<void>;
+  onBackgroundRemoval: (options: LocalBackgroundRemovalOptions | { mode: 'ai' }) => Promise<void>;
   onWatermark: (options: WatermarkOptions) => Promise<void>;
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
@@ -577,7 +598,7 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, on
     case 'metadata': return <MetadataPanel asset={asset} onApply={onMetadata} onClear={onClearMetadata} setNotice={setNotice} />;
     case 'batch': return <BatchPanel count={assets.length} onApply={onBatch} />;
     case 'gif': return <GifPanel count={assets.length} onApply={onExportGif} />;
-    case 'ai': return <AiPanel asset={asset} setNotice={setNotice} />;
+    case 'ai': return <AiPanel asset={asset} onApply={onBackgroundRemoval} setNotice={setNotice} />;
     case 'id-photo': return <IdPhotoPanel asset={asset} onApply={onCrop} />;
     default: return <EmptyPanel />;
   }
@@ -716,12 +737,81 @@ function BatchPanel({ count, onApply }: { count: number; onApply: (kind: 'resize
 function GifPanel({ count, onApply }: { count: number; onApply: () => Promise<void> }) { return <><PanelIntro title="GIF / 动图" description="用当前工作区的图片生成轻量动图。" /><div className="gif-timeline">{Array.from({ length: Math.min(count, 6) }, (_, index) => <span key={index}>{index + 1}</span>)}{count > 6 && <b>+{count - 6}</b>}</div><div className="control-section"><Field label="帧率" suffix="FPS"><input type="number" defaultValue="8" min="1" max="60" /></Field><Field label="循环"><select className="select-input"><option>无限循环</option><option>播放一次</option></select></Field></div><div className="inline-info"><Film size={16} /><span>浏览器支持 GIF 编码，输出将保留在本机</span></div><ApplyButton onClick={() => void onApply()} label="导出 GIF" /></>;
 }
 
-function AiPanel({ asset, setNotice }: { asset: ImageAsset; setNotice: (notice: Notice) => void }) {
+function hexToRgb(value: string): [number, number, number] {
+  const normalized = value.replace('#', '').padEnd(6, '0').slice(0, 6);
+  return [0, 2, 4].map((index) => Number.parseInt(normalized.slice(index, index + 2), 16)) as [number, number, number];
+}
+
+function rgbToHex(color: [number, number, number]) {
+  return `#${color.map((value) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, '0')).join('')}`;
+}
+
+function AiPanel({ asset, onApply, setNotice }: { asset: ImageAsset; onApply: (options: LocalBackgroundRemovalOptions | { mode: 'ai' }) => Promise<void>; setNotice: (notice: Notice) => void }) {
+  const [mode, setMode] = useState<'ai' | 'local'>('local');
+  const [method, setMethod] = useState<'solid' | 'connected'>('solid');
   const [capability, setCapability] = useState<AiCapability | null>(null);
   const [loading, setLoading] = useState(false);
-  async function check() { setLoading(true); try { setCapability(await aiAdapter.capability()); } finally { setLoading(false); } }
-  async function loadModel(modelId: 'upscale-2x' | 'upscale-4x' | 'remove-background' | 'enhance') { setLoading(true); try { await aiAdapter.load(modelId, (value) => setNotice({ type: 'success', text: `模型加载 ${Math.round(value * 100)}%` })); setNotice({ type: 'success', text: '模型已准备好，可以接入本地推理' }); } catch (error) { setNotice({ type: 'warning', text: error instanceof Error ? error.message : '本地模型暂不可用' }); } finally { setLoading(false); } }
-  return <><PanelIntro title="AI 本地工具" description="模型优先运行在你的设备上，不上传原图。" /><div className="ai-status"><div className={`ai-orb ${capability?.runtime === 'unavailable' ? 'is-muted' : ''}`}><WandSparkles size={22} /></div><div><strong>{capability ? capability.runtime === 'webgpu' ? 'WebGPU 可用' : capability.runtime === 'wasm' ? 'WASM 降级模式' : '设备不支持' : '检查本机能力'}</strong><small>{capability?.modelConfigured ? '模型目录已配置，按需加载' : '未检测到模型文件'}</small></div><button className="icon-button" title="检测能力" onClick={() => void check()} disabled={loading}><RotateCcw size={15} /></button></div><div className="ai-actions"><button onClick={() => void loadModel('upscale-2x')}><Sparkles size={17} /><span><strong>AI 超分 ×2</strong><small>恢复细节与清晰度</small></span><ChevronDown size={15} /></button><button onClick={() => void loadModel('remove-background')}><WandSparkles size={17} /><span><strong>AI 抠图</strong><small>输出透明 PNG</small></span><ChevronDown size={15} /></button><button onClick={() => void loadModel('enhance')}><Sun size={17} /><span><strong>AI 增强</strong><small>去噪与色彩修复</small></span><ChevronDown size={15} /></button></div><div className="ai-footnote"><Info size={14} /><span>模型路径可通过 <code>VITE_MODEL_BASE_URL</code> 配置。当前文件：{asset.name}</span></div></>;
+  const [targetColor, setTargetColor] = useState<[number, number, number]>([255, 255, 255]);
+  const [seed, setSeed] = useState({ x: 50, y: 50 });
+  const [tolerance, setTolerance] = useState(18);
+  const [feather, setFeather] = useState(4);
+  const frameRef = useRef<HTMLDivElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
+
+  useEffect(() => setSeed({ x: 50, y: 50 }), [asset.id]);
+
+  async function check() {
+    setLoading(true);
+    try { setCapability(await aiAdapter.capability()); } finally { setLoading(false); }
+  }
+
+  async function loadModel(modelId: 'upscale-2x' | 'upscale-4x' | 'remove-background' | 'enhance') {
+    setLoading(true);
+    try {
+      await aiAdapter.load(modelId, (value) => setNotice({ type: 'success', text: `模型加载 ${Math.round(value * 100)}%` }));
+      setNotice({ type: 'success', text: '模型文件已找到，可以尝试运行' });
+    } catch (error) {
+      setNotice({ type: 'warning', text: error instanceof Error ? error.message : '本地模型暂不可用' });
+    } finally { setLoading(false); }
+  }
+
+  async function pickColor(event: React.PointerEvent<HTMLDivElement>) {
+    const frame = frameRef.current;
+    const image = imageRef.current;
+    if (!frame || !image) return;
+    const rect = frame.getBoundingClientRect();
+    const x = Math.max(0, Math.min(100, ((event.clientX - rect.left) / rect.width) * 100));
+    const y = Math.max(0, Math.min(100, ((event.clientY - rect.top) / rect.height) * 100));
+    const canvas = document.createElement('canvas');
+    canvas.width = 1;
+    canvas.height = 1;
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    context.drawImage(image, (x / 100) * image.naturalWidth, (y / 100) * image.naturalHeight, 1, 1, 0, 0, 1, 1);
+    const pixel = context.getImageData(0, 0, 1, 1).data;
+    setTargetColor([pixel[0], pixel[1], pixel[2]]);
+    setSeed({ x, y });
+    setNotice({ type: 'success', text: method === 'solid' ? '已取样全图要移除的颜色' : '已选择联通色块起点' });
+  }
+
+  const localOptions: LocalBackgroundRemovalOptions = { method, targetColor, seedX: seed.x, seedY: seed.y, tolerance, feather };
+  return <>
+    <PanelIntro title="AI 抠图 / 本地抠图" description="AI 模型按需运行；没有模型时，也可在浏览器中按颜色透明化。" />
+    <div className="control-section"><div className="segmented-grid two"><button className={mode === 'ai' ? 'is-selected' : ''} onClick={() => setMode('ai')}><WandSparkles size={13} /> AI 抠图</button><button className={mode === 'local' ? 'is-selected' : ''} onClick={() => setMode('local')}><SlidersHorizontal size={13} /> 纯本地</button></div></div>
+    {mode === 'ai' ? <>
+      <div className="ai-status"><div className={`ai-orb ${capability?.runtime === 'unavailable' ? 'is-muted' : ''}`}><WandSparkles size={22} /></div><div><strong>{capability ? capability.runtime === 'webgpu' ? 'WebGPU 优先' : capability.runtime === 'wasm' ? 'WASM 降级模式' : '设备不支持' : '检查本机能力'}</strong><small>{capability?.modelConfigured ? '模型目录已配置，按需加载' : '未检测到模型文件'}</small></div><button className="icon-button" title="检测能力" onClick={() => void check()} disabled={loading}><RotateCcw size={15} /></button></div>
+      <div className="ai-actions"><button onClick={() => void loadModel('remove-background')} disabled={loading}><WandSparkles size={17} /><span><strong>准备 AI 抠图模型</strong><small>WebGPU 优先，WASM 降级</small></span><ChevronDown size={15} /></button></div>
+      <div className="inline-info"><Info size={16} /><span>模型缺失或推理图未配置时不会上传图片，请切换到纯本地模式完成处理。</span></div>
+      <ApplyButton onClick={() => void onApply({ mode: 'ai' })} label="运行 AI 抠图" />
+    </> : <>
+      <div className="control-section"><div className="segmented-grid two"><button className={method === 'solid' ? 'is-selected' : ''} onClick={() => setMethod('solid')}>纯色批量抠除</button><button className={method === 'connected' ? 'is-selected' : ''} onClick={() => setMethod('connected')}>联通色块抠除</button></div></div>
+      <div className="control-section direct-tool-section"><div className="direct-image-frame background-pick-frame" ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerDown={(event) => void pickColor(event)}><img ref={imageRef} src={asset.url} alt="点击取样抠图颜色" />{<span className="background-pick-marker" style={{ left: `${seed.x}%`, top: `${seed.y}%` }} />}</div><div className="direct-tool-caption"><span>点击图片取样颜色和起点</span><span>{method === 'solid' ? '全图匹配' : '仅联通区域'}</span></div></div>
+      <div className="control-section"><div className="color-field"><span>目标颜色</span><label><input type="color" value={rgbToHex(targetColor)} onChange={(event) => setTargetColor(hexToRgb(event.target.value))} /><b>{rgbToHex(targetColor).toUpperCase()}</b></label></div><div className="range-heading"><span>色彩匹配度</span><strong>{tolerance}%</strong></div><input className="range-input" type="range" min="1" max="100" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} /><div className="range-labels"><span>更严格</span><span>更宽松</span></div><div className="range-heading"><span>羽化半径</span><strong>{feather} px</strong></div><input className="range-input" type="range" min="0" max="40" value={feather} onChange={(event) => setFeather(Number(event.target.value))} /></div>
+      <div className="inline-info"><CheckCircle2 size={16} /><span>输出透明 PNG，纯色模式会批量移除所有匹配像素。</span></div>
+      <ApplyButton onClick={() => void onApply(localOptions)} label="应用本地抠图" />
+    </>}
+    <div className="ai-footnote"><Info size={14} /><span>模型路径可通过 <code>VITE_MODEL_BASE_URL</code> 配置。当前文件：{asset.name}</span></div>
+  </>;
 }
 
 function IdPhotoPanel({ asset, onApply }: { asset: ImageAsset; onApply: (values: { x: number; y: number; width: number; height: number }) => Promise<void> }) { const [size, setSize] = useState('一寸 · 25 × 35 mm'); const [background, setBackground] = useState('#4389d6'); return <><PanelIntro title="证件照" description="快速裁剪出常用证件照比例，背景色可在导出前调整。" /><div className="control-section"><Field label="照片规格"><select className="select-input" value={size} onChange={(event) => setSize(event.target.value)}><option>一寸 · 25 × 35 mm</option><option>二寸 · 35 × 49 mm</option><option>小一寸 · 22 × 32 mm</option><option>护照 · 35 × 45 mm</option><option>身份证 · 26 × 32 mm</option></select></Field><div className="color-field"><span>背景颜色</span><label><input type="color" value={background} onChange={(event) => setBackground(event.target.value)} /><b>{background.toUpperCase()}</b></label></div></div><div className="id-photo-preview"><img src={asset.url} alt="证件照预览" /><span>证件照比例</span></div><ApplyButton onClick={() => void onApply({ x: 0, y: 0, width: asset.width, height: Math.round(asset.width * 1.4) })} label="生成证件照" /></>; }

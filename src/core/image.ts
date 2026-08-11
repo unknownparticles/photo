@@ -1,4 +1,4 @@
-import type { ExportFormat, ExportOptions, ImageAsset, ImageOperation, ProcessedAsset, SplitLine, WatermarkOptions } from '../types';
+import type { ExportFormat, ExportOptions, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, ProcessedAsset, SplitLine, WatermarkOptions } from '../types';
 
 const DEFAULT_MAX_EDGE = 8192;
 
@@ -191,6 +191,87 @@ export async function applyAdjustments(asset: ImageAsset, values: { brightness: 
   return createAssetFromBlob(blob, addSuffix(asset.name, '编辑'));
 }
 
+function colorDistance(red: number, green: number, blue: number, target: [number, number, number]) {
+  const redDelta = red - target[0];
+  const greenDelta = green - target[1];
+  const blueDelta = blue - target[2];
+  return Math.sqrt(redDelta * redDelta + greenDelta * greenDelta + blueDelta * blueDelta) / 441.67295593;
+}
+
+function blurAlpha(data: Uint8ClampedArray, width: number, height: number, radius: number) {
+  if (radius < 1) return;
+  const horizontal = new Float32Array(width * height);
+  const vertical = new Uint8ClampedArray(width * height);
+  const rowPrefix = new Float32Array(width + 1);
+  for (let y = 0; y < height; y += 1) {
+    rowPrefix[0] = 0;
+    for (let x = 0; x < width; x += 1) {
+      rowPrefix[x + 1] = rowPrefix[x] + data[(y * width + x) * 4 + 3];
+    }
+    for (let x = 0; x < width; x += 1) {
+      const left = Math.max(0, x - radius);
+      const right = Math.min(width - 1, x + radius);
+      const count = right - left + 1;
+      horizontal[y * width + x] = (rowPrefix[right + 1] - rowPrefix[left]) / count;
+    }
+  }
+  const columnPrefix = new Float32Array(height + 1);
+  for (let x = 0; x < width; x += 1) {
+    columnPrefix[0] = 0;
+    for (let y = 0; y < height; y += 1) {
+      columnPrefix[y + 1] = columnPrefix[y] + horizontal[y * width + x];
+    }
+    for (let y = 0; y < height; y += 1) {
+      const top = Math.max(0, y - radius);
+      const bottom = Math.min(height - 1, y + radius);
+      const count = bottom - top + 1;
+      vertical[y * width + x] = Math.round((columnPrefix[bottom + 1] - columnPrefix[top]) / count);
+    }
+  }
+  for (let index = 0; index < vertical.length; index += 1) data[index * 4 + 3] = vertical[index];
+}
+
+export async function removeBackgroundAsset(asset: ImageAsset, options: LocalBackgroundRemovalOptions) {
+  const canvas = await drawAsset(asset);
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('当前浏览器无法创建画布');
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+  const total = canvas.width * canvas.height;
+  const removeMask = new Uint8Array(total);
+  const threshold = Math.max(0, Math.min(1, options.tolerance / 100));
+  const matches = (index: number) => colorDistance(pixels.data[index * 4], pixels.data[index * 4 + 1], pixels.data[index * 4 + 2], options.targetColor) <= threshold;
+
+  if (options.method === 'solid') {
+    for (let index = 0; index < total; index += 1) if (matches(index)) removeMask[index] = 1;
+  } else {
+    const startX = Math.max(0, Math.min(canvas.width - 1, Math.round((options.seedX / 100) * (canvas.width - 1))));
+    const startY = Math.max(0, Math.min(canvas.height - 1, Math.round((options.seedY / 100) * (canvas.height - 1))));
+    const start = startY * canvas.width + startX;
+    const visited = new Uint8Array(total);
+    const stack = new Int32Array(total);
+    let stackSize = 0;
+    stack[stackSize++] = start;
+    visited[start] = 1;
+    while (stackSize > 0) {
+      const index = stack[--stackSize];
+      if (!matches(index)) continue;
+      removeMask[index] = 1;
+      const x = index % canvas.width;
+      const y = Math.floor(index / canvas.width);
+      if (x > 0 && !visited[index - 1]) { visited[index - 1] = 1; if (matches(index - 1)) stack[stackSize++] = index - 1; }
+      if (x < canvas.width - 1 && !visited[index + 1]) { visited[index + 1] = 1; if (matches(index + 1)) stack[stackSize++] = index + 1; }
+      if (y > 0 && !visited[index - canvas.width]) { visited[index - canvas.width] = 1; if (matches(index - canvas.width)) stack[stackSize++] = index - canvas.width; }
+      if (y < canvas.height - 1 && !visited[index + canvas.width]) { visited[index + canvas.width] = 1; if (matches(index + canvas.width)) stack[stackSize++] = index + canvas.width; }
+    }
+  }
+
+  for (let index = 0; index < total; index += 1) if (removeMask[index]) pixels.data[index * 4 + 3] = 0;
+  blurAlpha(pixels.data, canvas.width, canvas.height, Math.max(0, Math.min(40, Math.round(options.feather))));
+  context.putImageData(pixels, 0, 0);
+  const blob = await canvasToBlob(canvas, 'image/png');
+  return createAssetFromBlob(blob, addSuffix(asset.name, '抠图'));
+}
+
 export async function applyWatermark(asset: ImageAsset, options: WatermarkOptions) {
   const canvas = await drawAsset(asset);
   const context = canvas.getContext('2d');
@@ -289,6 +370,8 @@ export async function processLocalOperation(asset: ImageAsset, operation: ImageO
       return applyAdjustments(asset, operation.params as never);
     case 'watermark':
       return applyWatermark(asset, operation.params as unknown as WatermarkOptions);
+    case 'background-remove':
+      return removeBackgroundAsset(asset, operation.params as unknown as LocalBackgroundRemovalOptions);
     default:
       return asset;
   }
