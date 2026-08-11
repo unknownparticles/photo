@@ -278,7 +278,7 @@ export function asProcessedAsset(asset: ImageAsset): ProcessedAsset {
 export async function readImageMetadata(file: File) {
   try {
     const exifr = await import('exifr');
-    return (await exifr.parse(file, { tiff: true, ifd0: true, exif: true, gps: true })) as Record<string, unknown> | undefined;
+    return (await exifr.parse(file, { tiff: true, exif: true, gps: true })) as Record<string, unknown> | undefined;
   } catch {
     return undefined;
   }
