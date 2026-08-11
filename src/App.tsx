@@ -663,7 +663,7 @@ function WatermarkPanel({ asset, onApply }: { asset: ImageAsset; onApply: (optio
     const point = pointerPoint(event);
     event.preventDefault();
     event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    frameRef.current?.setPointerCapture(event.pointerId);
     dragRef.current = { mode, startX: point.x, startY: point.y, x, y, width };
   }
 
