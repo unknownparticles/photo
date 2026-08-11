@@ -47,6 +47,19 @@ export interface SplitLine {
   position: number;
 }
 
+export interface WatermarkOptions {
+  kind: 'text' | 'image';
+  text: string;
+  opacity: number;
+  position: string;
+  x: number;
+  y: number;
+  width: number;
+  color?: string;
+  fontSize?: number;
+  image?: ImageAsset;
+}
+
 export interface ExportOptions {
   format: ExportFormat;
   quality: number;

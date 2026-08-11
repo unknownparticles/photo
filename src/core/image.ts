@@ -1,4 +1,4 @@
-import type { ExportFormat, ExportOptions, ImageAsset, ImageOperation, ProcessedAsset, SplitLine } from '../types';
+import type { ExportFormat, ExportOptions, ImageAsset, ImageOperation, ProcessedAsset, SplitLine, WatermarkOptions } from '../types';
 
 const DEFAULT_MAX_EDGE = 8192;
 
@@ -191,21 +191,29 @@ export async function applyAdjustments(asset: ImageAsset, values: { brightness: 
   return createAssetFromBlob(blob, addSuffix(asset.name, '编辑'));
 }
 
-export async function applyWatermark(asset: ImageAsset, text: string, opacity: number, position: string) {
+export async function applyWatermark(asset: ImageAsset, options: WatermarkOptions) {
   const canvas = await drawAsset(asset);
   const context = canvas.getContext('2d');
   if (!context) throw new Error('当前浏览器无法创建画布');
   const padding = Math.max(18, Math.round(canvas.width * 0.035));
+  const x = Math.max(0, Math.min(canvas.width, Math.round((options.x / 100) * canvas.width)));
+  const y = Math.max(0, Math.min(canvas.height, Math.round((options.y / 100) * canvas.height)));
+  const targetWidth = Math.max(1, Math.min(canvas.width, Math.round((options.width / 100) * canvas.width)));
   context.save();
-  context.globalAlpha = opacity;
-  context.fillStyle = '#ffffff';
-  context.shadowColor = 'rgba(0, 0, 0, .35)';
-  context.shadowBlur = 8;
-  context.font = `600 ${Math.max(16, Math.round(canvas.width / 28))}px system-ui`;
-  const metrics = context.measureText(text);
-  const x = position.includes('left') ? padding : position.includes('right') ? canvas.width - metrics.width - padding : (canvas.width - metrics.width) / 2;
-  const y = position.includes('top') ? padding + 28 : position.includes('bottom') ? canvas.height - padding : canvas.height / 2;
-  context.fillText(text, x, y);
+  context.globalAlpha = Math.max(0, Math.min(1, options.opacity));
+  if (options.kind === 'image' && options.image) {
+    const watermark = await loadImage(options.image.blob);
+    const watermarkHeight = Math.max(1, Math.round(targetWidth * (watermark.naturalHeight / watermark.naturalWidth)));
+    context.drawImage(watermark, x, y, targetWidth, watermarkHeight);
+  } else {
+    const fontSize = Math.max(16, Math.round(options.fontSize ? (options.fontSize / 100) * canvas.width : canvas.width / 28));
+    context.fillStyle = options.color ?? '#ffffff';
+    context.shadowColor = 'rgba(0, 0, 0, .35)';
+    context.shadowBlur = 8;
+    context.font = `600 ${fontSize}px system-ui`;
+    context.textBaseline = 'top';
+    context.fillText(options.text, x || padding, y || padding);
+  }
   context.restore();
   const blob = await canvasToBlob(canvas, 'image/png');
   return createAssetFromBlob(blob, addSuffix(asset.name, '水印'));
@@ -280,7 +288,7 @@ export async function processLocalOperation(asset: ImageAsset, operation: ImageO
     case 'edit':
       return applyAdjustments(asset, operation.params as never);
     case 'watermark':
-      return applyWatermark(asset, String(operation.params.text), Number(operation.params.opacity), String(operation.params.position));
+      return applyWatermark(asset, operation.params as unknown as WatermarkOptions);
     default:
       return asset;
   }
@@ -297,4 +305,186 @@ export async function readImageMetadata(file: File) {
   } catch {
     return undefined;
   }
+}
+
+type MetadataValue = unknown;
+
+function metadataString(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+  return value === undefined || value === null ? '' : String(value);
+}
+
+function asciiBytes(value: string, maxLength = 240) {
+  const normalized = value.slice(0, maxLength).replace(/[^\x20-\x7E]/g, '?');
+  const bytes = new TextEncoder().encode(`${normalized}\0`);
+  return bytes;
+}
+
+function rational(value: number) {
+  const denominator = 1000000;
+  return [Math.round(value * denominator), denominator] as const;
+}
+
+function gpsParts(value: MetadataValue) {
+  if (value === undefined || value === '') return null;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  const absolute = Math.abs(numeric);
+  return {
+    ref: numeric < 0 ? 'W' : 'E',
+    values: [Math.floor(absolute), (absolute % 1) * 60, ((absolute * 60) % 1) * 60],
+  };
+}
+
+function writeExif(metadata: Record<string, unknown>) {
+  const entries: Array<{ tag: number; type: number; count: number; value: Uint8Array | number }> = [];
+  const addAscii = (tag: number, key: string) => {
+    const value = metadataString(metadata, key);
+    if (value) entries.push({ tag, type: 2, count: asciiBytes(value).length, value: asciiBytes(value) });
+  };
+  addAscii(0x010e, 'ImageDescription');
+  addAscii(0x010f, 'Make');
+  addAscii(0x0110, 'Model');
+  addAscii(0x0131, 'Software');
+  addAscii(0x013b, 'Artist');
+  addAscii(0x8298, 'Copyright');
+  addAscii(0x9003, 'DateTimeOriginal');
+
+  const latitude = gpsParts(metadata.GPSLatitude);
+  const longitude = gpsParts(metadata.GPSLongitude);
+  const hasGps = Boolean(latitude && longitude);
+  if (hasGps) entries.push({ tag: 0x8825, type: 4, count: 1, value: 0 });
+  entries.sort((a, b) => a.tag - b.tag);
+
+  const ifdOffset = 8;
+  const ifdSize = 2 + entries.length * 12 + 4;
+  let dataOffset = ifdOffset + ifdSize;
+  const dataParts: Uint8Array[] = [];
+  const offsets = new Map<number, number>();
+  for (const entry of entries) {
+    if (typeof entry.value !== 'number') {
+      offsets.set(entry.tag, dataOffset);
+      dataParts.push(entry.value);
+      dataOffset += entry.value.length;
+    }
+  }
+
+  let gpsOffset = 0;
+  let gpsBytes = new Uint8Array();
+  if (hasGps && latitude && longitude) {
+    gpsOffset = dataOffset;
+    const gpsEntries = [
+      { tag: 0x0001, type: 2, count: 2, value: asciiBytes(latitude.ref, 1) },
+      { tag: 0x0002, type: 5, count: 3, value: latitude.values },
+      { tag: 0x0003, type: 2, count: 2, value: asciiBytes(longitude.ref, 1) },
+      { tag: 0x0004, type: 5, count: 3, value: longitude.values },
+    ];
+    const gpsIfdSize = 2 + gpsEntries.length * 12 + 4;
+    let gpsDataOffset = gpsOffset + gpsIfdSize;
+    const gpsDataParts: Uint8Array[] = [];
+    const gpsDataOffsets: number[] = [];
+    for (const entry of gpsEntries) {
+      if (Array.isArray(entry.value)) {
+        gpsDataOffsets.push(gpsDataOffset);
+        const bytes = new Uint8Array(entry.value.length * 8);
+        const view = new DataView(bytes.buffer);
+        entry.value.forEach((part, index) => {
+          const [numerator, denominator] = rational(part);
+          view.setUint32(index * 8, numerator, true);
+          view.setUint32(index * 8 + 4, denominator, true);
+        });
+        gpsDataParts.push(bytes);
+        gpsDataOffset += bytes.length;
+      } else gpsDataOffsets.push(0);
+    }
+    gpsBytes = new Uint8Array(gpsDataOffset - gpsOffset);
+    const gpsView = new DataView(gpsBytes.buffer);
+    gpsView.setUint16(0, gpsEntries.length, true);
+    gpsEntries.forEach((entry, index) => {
+      const offset = 2 + index * 12;
+      gpsView.setUint16(offset, entry.tag, true);
+      gpsView.setUint16(offset + 2, entry.type, true);
+      gpsView.setUint32(offset + 4, entry.count, true);
+      if (Array.isArray(entry.value)) gpsView.setUint32(offset + 8, gpsDataOffsets[index], true);
+      else gpsBytes.set(entry.value, offset + 8);
+    });
+    let cursor = gpsIfdSize;
+    for (const part of gpsDataParts) {
+      gpsBytes.set(part, cursor);
+      cursor += part.length;
+    }
+    dataParts.push(gpsBytes);
+    dataOffset += gpsBytes.length;
+  }
+
+  const tiff = new Uint8Array(dataOffset);
+  const view = new DataView(tiff.buffer);
+  tiff.set(new Uint8Array([0x49, 0x49, 0x2a, 0x00]), 0);
+  view.setUint32(4, ifdOffset, true);
+  view.setUint16(ifdOffset, entries.length, true);
+  entries.forEach((entry, index) => {
+    const offset = ifdOffset + 2 + index * 12;
+    view.setUint16(offset, entry.tag, true);
+    view.setUint16(offset + 2, entry.type, true);
+    view.setUint32(offset + 4, entry.count, true);
+    if (entry.tag === 0x8825) view.setUint32(offset + 8, gpsOffset, true);
+    else if (typeof entry.value === 'number') view.setUint32(offset + 8, entry.value, true);
+    else if (entry.value.length <= 4) tiff.set(entry.value, offset + 8);
+    else view.setUint32(offset + 8, offsets.get(entry.tag) ?? 0, true);
+  });
+  let cursor = ifdOffset + ifdSize;
+  for (const part of dataParts) {
+    tiff.set(part, cursor);
+    cursor += part.length;
+  }
+  return tiff;
+}
+
+export async function updateImageMetadata(blob: Blob, metadata: Record<string, unknown>) {
+  const tiff = writeExif(metadata);
+  const source = new Uint8Array(await blob.arrayBuffer());
+  if (blob.type === 'image/png') {
+    if (source.length < 33 || source[0] !== 0x89 || source[1] !== 0x50 || source[2] !== 0x4e || source[3] !== 0x47) return blob;
+    const chunk = pngChunk('eXIf', tiff);
+    const firstChunkLength = (source[8] << 24) | (source[9] << 16) | (source[10] << 8) | source[11];
+    const insertAt = 8 + 12 + firstChunkLength;
+    const result = new Uint8Array(source.length + chunk.length);
+    result.set(source.subarray(0, insertAt), 0);
+    result.set(chunk, insertAt);
+    result.set(source.subarray(insertAt), insertAt + chunk.length);
+    return new Blob([result], { type: 'image/png' });
+  }
+  if (blob.type !== 'image/jpeg') return blob;
+  const payload = new Uint8Array(6 + tiff.length);
+  payload.set(new Uint8Array([0x45, 0x78, 0x69, 0x66, 0x00, 0x00]));
+  payload.set(tiff, 6);
+  if (payload.length + 2 > 0xffff) throw new Error('元数据过大，无法写入 JPEG');
+  const segment = new Uint8Array(payload.length + 4);
+  segment.set(new Uint8Array([0xff, 0xe1, (payload.length + 2) >> 8, (payload.length + 2) & 0xff]));
+  segment.set(payload, 4);
+  const result = new Uint8Array(source.length + segment.length);
+  result.set(source.subarray(0, 2), 0);
+  result.set(segment, 2);
+  result.set(source.subarray(2), segment.length + 2);
+  return new Blob([result], { type: 'image/jpeg' });
+}
+
+function pngChunk(type: string, data: Uint8Array) {
+  const typeBytes = new TextEncoder().encode(type);
+  const chunk = new Uint8Array(12 + data.length);
+  const view = new DataView(chunk.buffer);
+  view.setUint32(0, data.length, false);
+  chunk.set(typeBytes, 4);
+  chunk.set(data, 8);
+  view.setUint32(8 + data.length, crc32(chunk.subarray(4, 8 + data.length)), false);
+  return chunk;
+}
+
+function crc32(bytes: Uint8Array) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }

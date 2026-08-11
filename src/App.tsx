@@ -56,9 +56,10 @@ import {
   readImageMetadata,
   resizeAsset,
   splitAsset,
+  updateImageMetadata,
 } from './core/image';
 import { useAppStore } from './store';
-import type { AiCapability, ExportFormat, ImageAsset, ImageOperation, SplitLine, ToolId } from './types';
+import type { AiCapability, ExportFormat, ImageAsset, ImageOperation, SplitLine, ToolId, WatermarkOptions } from './types';
 import { DirectCropPanel, DirectSplitPanel } from './components/DirectImageControls';
 
 type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
@@ -101,6 +102,8 @@ const formatOptions: Array<{ label: string; value: ExportFormat }> = [
   { label: 'WebP', value: 'image/webp' },
   { label: 'AVIF', value: 'image/avif' },
 ];
+
+const metadataFields = [['Make', '制造商'], ['Model', '相机型号'], ['ImageDescription', '图片描述'], ['Artist', '作者'], ['Copyright', '版权'], ['DateTimeOriginal', '拍摄时间'], ['GPSLatitude', '纬度'], ['GPSLongitude', '经度']] as const;
 
 function operation(type: string, params: Record<string, unknown>): ImageOperation {
   return { id: crypto.randomUUID(), type, params, createdAt: Date.now() };
@@ -221,9 +224,43 @@ function App() {
     await replaceActive(await applyAdjustments(activeAsset, values), '图片编辑', '色彩调整');
   }
 
-  async function applyWatermarkValue(text: string, opacity: number, position: string) {
-    if (!activeAsset || !text.trim()) return;
-    await replaceActive(await applyWatermark(activeAsset, text, opacity, position), '添加水印', text);
+  async function applyWatermarkValue(options: WatermarkOptions) {
+    if (!activeAsset || (options.kind === 'text' && !options.text.trim()) || (options.kind === 'image' && !options.image)) return;
+    await replaceActive(await applyWatermark(activeAsset, options), '添加水印', options.kind === 'text' ? options.text : '图片水印');
+  }
+
+  async function applyMetadataValue(values: Record<string, string>) {
+    if (!activeAsset) return;
+    const metadata = { ...(activeAsset.metadata ?? {}) };
+    Object.entries(values).forEach(([key, value]) => {
+      if (value.trim()) metadata[key] = value.trim();
+      else delete metadata[key];
+    });
+    const format = activeAsset.type === 'image/jpeg' || activeAsset.type === 'image/png' ? activeAsset.type : 'image/jpeg';
+    const blob = await encodeAsset(asProcessedAsset(activeAsset), {
+      format,
+      quality: 0.94,
+      background: '#ffffff',
+      preserveTransparency: format !== 'image/jpeg',
+      preserveMetadata: false,
+    });
+    const updatedBlob = await updateImageMetadata(blob, metadata);
+    const next = await createAssetFromBlob(updatedBlob, `${fileNameWithoutExtension(activeAsset.name)}.${format === 'image/jpeg' ? 'jpg' : 'png'}`);
+    await replaceActive({ ...next, metadata }, '修改照片信息', '已写入常见照片信息');
+  }
+
+  async function clearMetadataValue() {
+    if (!activeAsset) return;
+    const format = activeAsset.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+    const blob = await encodeAsset(asProcessedAsset(activeAsset), {
+      format,
+      quality: 0.94,
+      background: '#ffffff',
+      preserveTransparency: format !== 'image/jpeg',
+      preserveMetadata: false,
+    });
+    const next = await createAssetFromBlob(blob, `${fileNameWithoutExtension(activeAsset.name)}.${format === 'image/jpeg' ? 'jpg' : 'png'}`);
+    await replaceActive(next, '清除照片数据', '已移除 EXIF 与 GPS');
   }
 
   async function applyEncoding(format: ExportFormat, quality: number, background: string) {
@@ -366,6 +403,8 @@ function App() {
           onEncode={applyEncoding}
           onEdit={applyEdit}
           onWatermark={applyWatermarkValue}
+          onMetadata={applyMetadataValue}
+          onClearMetadata={clearMetadataValue}
           onExportGif={exportGif}
           onBatch={applyBatch}
           setNotice={setNotice}
@@ -465,6 +504,8 @@ function Workspace({
   onEncode,
   onEdit,
   onWatermark,
+  onMetadata,
+  onClearMetadata,
   onExportGif,
   onBatch,
   setNotice,
@@ -484,7 +525,9 @@ function Workspace({
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
   onEdit: (values: { brightness: number; contrast: number; saturation: number; blur: number }) => Promise<void>;
-  onWatermark: (text: string, opacity: number, position: string) => Promise<void>;
+  onWatermark: (options: WatermarkOptions) => Promise<void>;
+  onMetadata: (values: Record<string, string>) => Promise<void>;
+  onClearMetadata: () => Promise<void>;
   onExportGif: () => Promise<void>;
   onBatch: (kind: 'resize' | 'webp') => Promise<void>;
   setNotice: (notice: Notice) => void;
@@ -497,14 +540,14 @@ function Workspace({
       <div className="asset-strip"><div className="asset-strip-label"><span className="eyebrow">WORKSPACE</span><strong>{assets.length} 张图片</strong></div><div className="asset-thumbs">{assets.map((asset, index) => <button className={`asset-thumb ${asset.id === activeAsset?.id ? 'is-active' : ''}`} key={asset.id} onClick={() => onSelectAsset(asset.id)}><img src={asset.url} alt={asset.name} /><span>{index + 1}</span></button>)}<button className="add-thumb" onClick={onAddFiles}><Plus size={17} /></button></div><div className="asset-total">总计 {formatBytes(assets.reduce((sum, asset) => sum + asset.size, 0))}</div></div>
       <div className="workspace-layout">
         <aside className="tool-sidebar"><div className="sidebar-title"><PanelLeft size={15} /><span>工具</span></div><div className="sidebar-list">{tools.map((tool) => { const ToolIcon = tool.icon; return <button className={`sidebar-tool ${activeTool === tool.id ? 'is-active' : ''}`} key={tool.id} onClick={() => onSelectTool(tool.id)} title={tool.description}><ToolIcon size={17} /><span>{tool.label}</span>{activeTool === tool.id && <span className="active-bar" />}</button>; })}</div><div className="sidebar-bottom"><ShieldCheck size={16} /><small>本地模式<br />Local only</small></div></aside>
-        <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 实时预览</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className="preview-stage"><div className="stage-grid" />{activeAsset ? <img className="main-preview" src={activeAsset.url} alt={activeAsset.name} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="删除全部" onClick={onClear}><Trash2 size={16} /></button></div></div></section>
-        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onWatermark={onWatermark} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
+        <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 实时预览</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <img className="main-preview" src={activeAsset.url} alt={activeAsset.name} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="删除全部" onClick={onClear}><Trash2 size={16} /></button></div></div></section>
+        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
       </div>
     </main>
   );
 }
 
-function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, onEncode, onEdit, onWatermark, onExportGif, onBatch, setNotice }: {
+function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, onEncode, onEdit, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, setNotice }: {
   tool: ToolId;
   asset: ImageAsset | null;
   assets: ImageAsset[];
@@ -514,7 +557,9 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, on
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
   onEdit: (values: { brightness: number; contrast: number; saturation: number; blur: number }) => Promise<void>;
-  onWatermark: (text: string, opacity: number, position: string) => Promise<void>;
+  onWatermark: (options: WatermarkOptions) => Promise<void>;
+  onMetadata: (values: Record<string, string>) => Promise<void>;
+  onClearMetadata: () => Promise<void>;
   onExportGif: () => Promise<void>;
   onBatch: (kind: 'resize' | 'webp') => Promise<void>;
   setNotice: (notice: Notice) => void;
@@ -528,8 +573,8 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, on
     case 'compress': return <EncodePanel mode="compress" asset={asset} onApply={onEncode} />;
     case 'convert': return <EncodePanel mode="convert" asset={asset} onApply={onEncode} />;
     case 'edit': return <EditPanel onApply={onEdit} />;
-    case 'watermark': return <WatermarkPanel onApply={onWatermark} />;
-    case 'metadata': return <MetadataPanel asset={asset} onApply={onEncode} setNotice={setNotice} />;
+    case 'watermark': return <WatermarkPanel asset={asset} onApply={onWatermark} />;
+    case 'metadata': return <MetadataPanel asset={asset} onApply={onMetadata} onClear={onClearMetadata} setNotice={setNotice} />;
     case 'batch': return <BatchPanel count={assets.length} onApply={onBatch} />;
     case 'gif': return <GifPanel count={assets.length} onApply={onExportGif} />;
     case 'ai': return <AiPanel asset={asset} setNotice={setNotice} />;
@@ -579,17 +624,90 @@ function EditPanel({ onApply }: { onApply: (values: { brightness: number; contra
   return <><PanelIntro title="图片编辑" description="做一点轻量调整，保持原图清晰和色彩自然。" /><div className="control-section adjustment-list">{fields.map(([key, label, min, max]) => <div className="adjustment-row" key={key}><div><span>{label}</span><strong>{values[key]}</strong></div><input className="range-input" type="range" min={min} max={max} value={values[key]} onChange={(event) => setValues({ ...values, [key]: Number(event.target.value) })} /></div>)}</div><div className="filter-row"><button>自然</button><button>黑白</button><button>胶片</button><button>暖色</button></div><ApplyButton onClick={() => void onApply(values)} label="应用调整" /></>;
 }
 
-function WatermarkPanel({ onApply }: { onApply: (text: string, opacity: number, position: string) => Promise<void> }) {
+function WatermarkPanel({ asset, onApply }: { asset: ImageAsset; onApply: (options: WatermarkOptions) => Promise<void> }) {
+  const [kind, setKind] = useState<'text' | 'image'>('text');
   const [text, setText] = useState('Alun Image');
   const [opacity, setOpacity] = useState(0.72);
   const [position, setPosition] = useState('right-bottom');
-  return <><PanelIntro title="添加水印" description="用轻量文字标记保护你的作品。" /><div className="control-section"><Field label="水印文字"><input value={text} maxLength={40} onChange={(event) => setText(event.target.value)} /></Field><div className="range-heading"><span>透明度</span><strong>{Math.round(opacity * 100)}%</strong></div><input className="range-input" type="range" min="0.1" max="1" step="0.01" value={opacity} onChange={(event) => setOpacity(Number(event.target.value))} /></div><div className="control-section"><div className="section-label">位置</div><div className="position-grid">{['left-top', 'center-top', 'right-top', 'left-bottom', 'center', 'right-bottom'].map((value) => <button key={value} className={position === value ? 'is-selected' : ''} onClick={() => setPosition(value)}><span /></button>)}</div></div><ApplyButton onClick={() => void onApply(text, opacity, position)} label="应用水印" /></>;
+  const [x, setX] = useState(65);
+  const [y, setY] = useState(80);
+  const [width, setWidth] = useState(28);
+  const [watermarkImage, setWatermarkImage] = useState<ImageAsset | undefined>();
+  const frameRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ mode: 'move' | 'resize'; startX: number; startY: number; x: number; y: number; width: number } | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const watermarkHeight = watermarkImage ? width * (watermarkImage.height / watermarkImage.width) * (asset.width / asset.height) : width * 0.18;
+
+  useEffect(() => {
+    return () => {
+      if (watermarkImage) URL.revokeObjectURL(watermarkImage.url);
+    };
+  }, [watermarkImage]);
+
+  function setPreset(nextPosition: string) {
+    const nextX = nextPosition.includes('left') ? 5 : nextPosition.includes('right') ? 95 - width : (100 - width) / 2;
+    const nextY = nextPosition.includes('top') ? 5 : nextPosition.includes('bottom') ? 95 - watermarkHeight : (100 - watermarkHeight) / 2;
+    setPosition(nextPosition);
+    setX(Math.max(0, nextX));
+    setY(Math.max(0, nextY));
+  }
+
+  function pointerPoint(event: React.PointerEvent<HTMLElement>) {
+    const frame = frameRef.current;
+    if (!frame) return { x: 0, y: 0 };
+    const rect = frame.getBoundingClientRect();
+    return { x: ((event.clientX - rect.left) / rect.width) * 100, y: ((event.clientY - rect.top) / rect.height) * 100 };
+  }
+
+  function startDrag(event: React.PointerEvent<HTMLElement>, mode: 'move' | 'resize') {
+    const point = pointerPoint(event);
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { mode, startX: point.x, startY: point.y, x, y, width };
+  }
+
+  function moveDrag(event: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const point = pointerPoint(event);
+    if (drag.mode === 'move') {
+      setX(Math.max(0, Math.min(100 - width, drag.x + point.x - drag.startX)));
+      setY(Math.max(0, Math.min(100 - watermarkHeight, drag.y + point.y - drag.startY)));
+    } else {
+      setWidth(Math.max(6, Math.min(90, drag.width + point.x - drag.startX)));
+    }
+  }
+
+  function endDrag(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    dragRef.current = null;
+  }
+
+  async function chooseWatermark(file: File | undefined) {
+    if (!file?.type.startsWith('image/')) return;
+    const next = await createAssetFromBlob(file, file.name, file);
+    setWatermarkImage(next);
+    setKind('image');
+  }
+
+  const options: WatermarkOptions = { kind, text, opacity, position, x, y, width, fontSize: width, image: watermarkImage };
+  return <>
+    <PanelIntro title="添加水印" description="文字或图片水印都可直接在原图比例画布上拖动和缩放。" />
+    <input ref={fileInput} className="visually-hidden" type="file" accept="image/*" onChange={(event) => void chooseWatermark(event.target.files?.[0])} />
+    <div className="control-section"><div className="segmented-grid two"><button className={kind === 'text' ? 'is-selected' : ''} onClick={() => setKind('text')}>文字水印</button><button className={kind === 'image' ? 'is-selected' : ''} onClick={() => { setKind('image'); fileInput.current?.click(); }}>图片水印</button></div>{kind === 'text' ? <Field label="水印文字"><input value={text} maxLength={40} onChange={(event) => setText(event.target.value)} /></Field> : <button className="watermark-file-button" onClick={() => fileInput.current?.click()}><ImagePlus size={16} /><span>{watermarkImage?.name ?? '选择一张水印图片'}</span></button>}<div className="range-heading"><span>透明度</span><strong>{Math.round(opacity * 100)}%</strong></div><input className="range-input" type="range" min="0.1" max="1" step="0.01" value={opacity} onChange={(event) => setOpacity(Number(event.target.value))} /></div>
+    <div className="control-section direct-tool-section"><div className="direct-image-frame watermark-interaction" ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}><img src={asset.url} alt="水印预览原图" />{(kind === 'text' || watermarkImage) && <div className={`watermark-overlay ${kind}`} style={{ left: `${x}%`, top: `${y}%`, width: `${width}%` }} onPointerDown={(event) => startDrag(event, 'move')}>{kind === 'text' ? text : <img src={watermarkImage?.url} alt="图片水印" />}<button type="button" className="watermark-resize-handle" aria-label="调整水印大小" onPointerDown={(event) => startDrag(event, 'resize')} /></div>}</div><div className="direct-tool-caption"><span>拖动水印调整位置</span><span>拖动角点调整大小</span></div></div>
+    <div className="control-section"><div className="section-label">快速定位</div><div className="position-grid">{['left-top', 'center-top', 'right-top', 'left-bottom', 'center', 'right-bottom'].map((value) => <button key={value} className={position === value ? 'is-selected' : ''} onClick={() => setPreset(value)}><span /></button>)}</div></div>
+    <ApplyButton onClick={() => void onApply(options)} label="应用水印" />
+  </>;
 }
 
-function MetadataPanel({ asset, onApply, setNotice }: { asset: ImageAsset; onApply: (format: ExportFormat, quality: number, background: string) => Promise<void>; setNotice: (notice: Notice) => void }) {
+function MetadataPanel({ asset, onApply, onClear, setNotice }: { asset: ImageAsset; onApply: (values: Record<string, string>) => Promise<void>; onClear: () => Promise<void>; setNotice: (notice: Notice) => void }) {
   const metadata = asset.metadata ?? {};
-  const rows = [['文件名', asset.name], ['文件类型', asset.type.replace('image/', '').toUpperCase()], ['尺寸', `${asset.width} × ${asset.height}`], ['文件大小', formatBytes(asset.size)], ['相机', String(metadata.Make ?? metadata.Model ?? '未读取')], ['拍摄时间', String(metadata.DateTimeOriginal ?? '未读取')]];
-  return <><PanelIntro title="图片信息" description="查看文件与拍摄信息，清理敏感元数据后再分享。" /><div className="metadata-list">{rows.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><div className="privacy-callout"><ShieldCheck size={17} /><span><strong>隐私建议</strong><small>导出时默认移除 EXIF 和 GPS 信息。</small></span></div><button className="secondary-button full" onClick={() => { void onApply('image/png', 0.9, '#ffffff'); setNotice({ type: 'success', text: '已导出不含 EXIF 的 PNG 副本' }); }}><Trash2 size={16} /> 清除元数据并应用</button></>;
+  const rows = [['文件名', asset.name], ['文件类型', asset.type.replace('image/', '').toUpperCase()], ['尺寸', `${asset.width} × ${asset.height}`], ['文件大小', formatBytes(asset.size)], ['相机', String(metadata.Make ?? metadata.Model ?? '未读取')], ['拍摄时间', String(metadata.DateTimeOriginal ?? '未读取')], ['GPS', metadata.GPSLatitude && metadata.GPSLongitude ? '已记录' : '未记录']];
+  const [values, setValues] = useState<Record<string, string>>({});
+  useEffect(() => setValues(Object.fromEntries(metadataFields.map(([key]) => [key, asset.metadata?.[key] === undefined ? '' : String(asset.metadata[key])]))), [asset.id, asset.metadata]);
+  return <><PanelIntro title="图片信息与元数据" description="查看照片信息，修改常见 EXIF 字段，或清除全部隐私数据。" /><div className="metadata-list">{rows.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><div className="control-section metadata-editor"><div className="section-label">编辑照片信息 <span className="muted">JPEG / PNG</span></div>{metadataFields.map(([key, label]) => <Field key={key} label={label}><input value={values[key] ?? ''} placeholder={key === 'GPSLatitude' || key === 'GPSLongitude' ? '例如 31.2304' : '未填写'} onChange={(event) => setValues((current) => ({ ...current, [key]: event.target.value }))} /></Field>)}</div><div className="privacy-callout"><ShieldCheck size={17} /><span><strong>隐私建议</strong><small>清除操作会移除 EXIF、GPS 和编辑痕迹；修改操作只写入常见照片字段。</small></span></div><div className="metadata-actions"><button className="secondary-button full" onClick={() => { void onApply(values); setNotice({ type: 'success', text: '正在写入照片信息' }); }}><CheckCircle2 size={16} /> 保存修改</button><button className="secondary-button full danger-action" onClick={() => { void onClear(); setNotice({ type: 'success', text: '已清除照片元数据' }); }}><Trash2 size={16} /> 清除全部数据</button></div></>;
 }
 
 function BatchPanel({ count, onApply }: { count: number; onApply: (kind: 'resize' | 'webp') => Promise<void> }) { return <><PanelIntro title="批量处理" description="同一套规则处理当前工作区的所有图片。" /><div className="batch-summary"><strong>{count}</strong><span>张图片<br /><small>等待处理</small></span></div><div className="pipeline"><div className="pipeline-step is-done"><Check size={14} /> 导入</div><div className="pipeline-line" /><div className="pipeline-step"><Maximize2 size={14} /> 调整尺寸</div><div className="pipeline-line" /><div className="pipeline-step"><ArrowRightLeft size={14} /> 转换</div><div className="pipeline-line" /><div className="pipeline-step"><Download size={14} /> 导出</div></div><button className="action-row" onClick={() => void onApply('resize')}><span><Maximize2 size={17} /><strong>最长边调整至 1920 px</strong><small>保持原始比例</small></span><ArrowRightLeft size={16} /></button><button className="action-row" onClick={() => void onApply('webp')}><span><ArrowRightLeft size={17} /><strong>统一转换为 WebP</strong><small>质量 85 · 保留透明</small></span><ArrowRightLeft size={16} /></button></>;
