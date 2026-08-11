@@ -9,7 +9,7 @@ export class LocalAiAdapter implements AiAdapter {
     const webgpu = 'gpu' in navigator;
     const wasm = typeof WebAssembly !== 'undefined';
     this.runtime = webgpu ? 'webgpu' : wasm ? 'wasm' : 'unavailable';
-    return { webgpu, wasm, runtime: this.runtime, modelConfigured: Boolean(modelBaseUrl) };
+    return { webgpu, wasm, runtime: this.runtime, modelConfigured: Boolean(import.meta.env.VITE_MODEL_BASE_URL) };
   }
 
   async load(modelId: AiOperationOptions['modelId'], onProgress?: (value: number) => void) {
