@@ -1,4 +1,4 @@
-import type { ExportFormat, ExportOptions, ImageAsset, ImageOperation, ProcessedAsset } from '../types';
+import type { ExportFormat, ExportOptions, ImageAsset, ImageOperation, ProcessedAsset, SplitLine } from '../types';
 
 const DEFAULT_MAX_EDGE = 8192;
 
@@ -95,17 +95,30 @@ export async function cropAsset(asset: ImageAsset, x: number, y: number, width: 
   return createAssetFromBlob(blob, addSuffix(asset.name, label));
 }
 
-export async function splitAsset(asset: ImageAsset, rows: number, columns: number, direction: 'horizontal' | 'vertical' | 'grid') {
-  const actualRows = direction === 'vertical' ? 1 : direction === 'horizontal' ? rows : rows;
-  const actualColumns = direction === 'horizontal' ? 1 : direction === 'vertical' ? columns : columns;
+export async function splitAsset(asset: ImageAsset, rows: number, columns: number, direction: 'horizontal' | 'vertical' | 'grid', customLines: SplitLine[] = []) {
   const image = await loadImage(asset.blob);
+  const horizontalLines = customLines
+    .filter((line) => line.orientation === 'horizontal')
+    .map((line) => Math.round((Math.max(0, Math.min(100, line.position)) / 100) * image.naturalHeight))
+    .filter((position, index, positions) => index === 0 || position !== positions[index - 1])
+    .sort((a, b) => a - b);
+  const verticalLines = customLines
+    .filter((line) => line.orientation === 'vertical')
+    .map((line) => Math.round((Math.max(0, Math.min(100, line.position)) / 100) * image.naturalWidth))
+    .filter((position, index, positions) => index === 0 || position !== positions[index - 1])
+    .sort((a, b) => a - b);
+  const hasCustomLines = customLines.length > 0;
+  const rowCuts = horizontalLines.length ? [0, ...horizontalLines, image.naturalHeight] : hasCustomLines ? [0, image.naturalHeight] : Array.from({ length: rows + 1 }, (_, index) => Math.round((index * image.naturalHeight) / rows));
+  const columnCuts = verticalLines.length ? [0, ...verticalLines, image.naturalWidth] : hasCustomLines ? [0, image.naturalWidth] : Array.from({ length: columns + 1 }, (_, index) => Math.round((index * image.naturalWidth) / columns));
+  const actualRows = hasCustomLines ? rowCuts.length - 1 : direction === 'vertical' ? 1 : rowCuts.length - 1;
+  const actualColumns = hasCustomLines ? columnCuts.length - 1 : direction === 'horizontal' ? 1 : columnCuts.length - 1;
   const outputs: ImageAsset[] = [];
   for (let row = 0; row < actualRows; row += 1) {
     for (let column = 0; column < actualColumns; column += 1) {
-      const left = Math.round((column * image.naturalWidth) / actualColumns);
-      const top = Math.round((row * image.naturalHeight) / actualRows);
-      const right = Math.round(((column + 1) * image.naturalWidth) / actualColumns);
-      const bottom = Math.round(((row + 1) * image.naturalHeight) / actualRows);
+      const left = columnCuts[column];
+      const top = rowCuts[row];
+      const right = columnCuts[column + 1];
+      const bottom = rowCuts[row + 1];
       const child = await cropAsset(asset, left, top, right - left, bottom - top, `${row * actualColumns + column + 1}`);
       outputs.push({ ...child, name: `${stripExtension(asset.name)}-${String(outputs.length + 1).padStart(2, '0')}.png` });
     }

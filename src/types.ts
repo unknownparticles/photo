@@ -41,6 +41,12 @@ export interface ImageOperation {
   createdAt: number;
 }
 
+export interface SplitLine {
+  id: string;
+  orientation: 'horizontal' | 'vertical';
+  position: number;
+}
+
 export interface ExportOptions {
   format: ExportFormat;
   quality: number;

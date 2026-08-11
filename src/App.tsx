@@ -11,7 +11,6 @@ import {
   CircleHelp,
   ClipboardPaste,
   Combine,
-  Columns3,
   Crop,
   Download,
   Droplets,
@@ -59,7 +58,8 @@ import {
   splitAsset,
 } from './core/image';
 import { useAppStore } from './store';
-import type { AiCapability, ExportFormat, ImageAsset, ImageOperation, ToolId } from './types';
+import type { AiCapability, ExportFormat, ImageAsset, ImageOperation, SplitLine, ToolId } from './types';
+import { DirectCropPanel, DirectSplitPanel } from './components/DirectImageControls';
 
 type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
 
@@ -239,9 +239,9 @@ function App() {
     await replaceActive(next, format === 'image/jpeg' ? '压缩图片' : '转换格式', `${format} · ${formatBytes(blob.size)}`);
   }
 
-  async function applySplit(direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number) {
+  async function applySplit(direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines: SplitLine[] = []) {
     if (!activeAsset) return;
-    const pieces = await splitAsset(activeAsset, rows, columns, direction);
+    const pieces = await splitAsset(activeAsset, rows, columns, direction, lines);
     addAssets(pieces);
     setActiveAsset(pieces[0]?.id ?? activeAsset.id);
     addHistory({ name: activeAsset.name, label: '分割图片', detail: `${pieces.length} 张` });
@@ -480,7 +480,7 @@ function Workspace({
   onExportAll: () => void;
   onResize: (width: number, height: number) => Promise<void>;
   onCrop: (values: { x: number; y: number; width: number; height: number }) => Promise<void>;
-  onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number) => Promise<void>;
+  onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
   onEdit: (values: { brightness: number; contrast: number; saturation: number; blur: number }) => Promise<void>;
@@ -510,7 +510,7 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, on
   assets: ImageAsset[];
   onResize: (width: number, height: number) => Promise<void>;
   onCrop: (values: { x: number; y: number; width: number; height: number }) => Promise<void>;
-  onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number) => Promise<void>;
+  onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
   onEdit: (values: { brightness: number; contrast: number; saturation: number; blur: number }) => Promise<void>;
@@ -523,7 +523,7 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, on
   switch (tool) {
     case 'resize': return <ResizePanel asset={asset} onApply={onResize} />;
     case 'crop': return <CropPanel asset={asset} onApply={onCrop} />;
-    case 'split': return <SplitPanel onApply={onSplit} />;
+    case 'split': return <SplitPanel asset={asset} onApply={onSplit} />;
     case 'merge': return <MergePanel count={assets.length} onApply={onMerge} />;
     case 'compress': return <EncodePanel mode="compress" asset={asset} onApply={onEncode} />;
     case 'convert': return <EncodePanel mode="convert" asset={asset} onApply={onEncode} />;
@@ -551,17 +551,11 @@ function ResizePanel({ asset, onApply }: { asset: ImageAsset; onApply: (width: n
 }
 
 function CropPanel({ asset, onApply }: { asset: ImageAsset; onApply: (values: { x: number; y: number; width: number; height: number }) => Promise<void> }) {
-  const [values, setValues] = useState({ x: 0, y: 0, width: asset.width, height: asset.height });
-  const setValue = (key: keyof typeof values, value: number) => setValues((current) => ({ ...current, [key]: value }));
-  const cropPresets = [{ label: '自由', ratio: null }, { label: '1 : 1', ratio: 1 }, { label: '4 : 3', ratio: 4 / 3 }, { label: '16 : 9', ratio: 16 / 9 }, { label: '9 : 16', ratio: 9 / 16 }];
-  return <><PanelIntro title="裁剪图片" description="精确控制裁剪区域，适合头像、封面和社交媒体尺寸。" /><div className="control-section"><div className="section-label">裁剪比例</div><div className="segmented-grid">{cropPresets.map((preset) => <button key={preset.label} className={preset.ratio && Math.abs(values.width / values.height - preset.ratio) < 0.02 ? 'is-selected' : !preset.ratio && values.width === asset.width ? 'is-selected' : ''} onClick={() => { if (!preset.ratio) { setValue('width', asset.width); setValue('height', asset.height); return; } const width = Math.min(asset.width, Math.round(asset.height * preset.ratio)); setValue('width', width); setValue('height', Math.round(width / preset.ratio)); }}>{preset.label}</button>)}</div></div><div className="control-section"><div className="section-label">裁剪区域 <span className="muted">px</span></div><div className="field-grid">{(['x', 'y', 'width', 'height'] as const).map((key) => <Field key={key} label={key === 'x' ? '左' : key === 'y' ? '上' : key === 'width' ? '宽' : '高'}><input type="number" min="0" value={values[key]} onChange={(event) => setValue(key, Number(event.target.value))} /></Field>)}</div></div><div className="crop-preview"><div className="crop-preview-frame"><img src={asset.url} alt="裁剪预览" /></div><span>实时预览</span></div><ApplyButton onClick={() => void onApply(values)} label="应用裁剪" /></>;
+  return <DirectCropPanel asset={asset} onApply={onApply} />;
 }
 
-function SplitPanel({ onApply }: { onApply: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number) => Promise<void> }) {
-  const [direction, setDirection] = useState<'horizontal' | 'vertical' | 'grid'>('grid');
-  const [rows, setRows] = useState(2);
-  const [columns, setColumns] = useState(2);
-  return <><PanelIntro title="分割图片" description="将长图或画布切成规则的小图，自动编号并保留在工作区。" /><div className="control-section"><div className="section-label">分割方式</div><div className="mode-cards">{[['horizontal', '横向', '一列多行'], ['vertical', '纵向', '一行多列'], ['grid', '网格', '行 × 列']].map(([value, label, detail]) => <button key={value} className={`mode-card ${direction === value ? 'is-selected' : ''}`} onClick={() => setDirection(value as typeof direction)}><span className="mode-symbol">{value === 'horizontal' ? <Columns3 size={17} /> : value === 'vertical' ? <Columns3 className="rotate-90" size={17} /> : <Combine size={17} />}</span><strong>{label}</strong><small>{detail}</small></button>)}</div></div><div className="control-section"><div className="field-row"><Field label={direction === 'vertical' ? '数量' : '行数'}><input type="number" min="1" max="12" value={rows} onChange={(event) => setRows(Number(event.target.value))} /></Field>{direction === 'grid' && <><span className="multiply">×</span><Field label="列数"><input type="number" min="1" max="12" value={columns} onChange={(event) => setColumns(Number(event.target.value))} /></Field></>}</div><div className="split-visual"><span /> <span /> <span /> <span /></div></div><ApplyButton onClick={() => void onApply(direction, rows, columns)} label="生成切图" /></>;
+function SplitPanel({ asset, onApply }: { asset: ImageAsset; onApply: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void> }) {
+  return <DirectSplitPanel asset={asset} onApply={onApply} />;
 }
 
 function MergePanel({ count, onApply }: { count: number; onApply: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void> }) {

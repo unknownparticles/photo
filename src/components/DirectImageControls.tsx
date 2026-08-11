@@ -1,0 +1,148 @@
+import { useEffect, useRef, useState } from 'react';
+import type { PointerEvent as ReactPointerEvent } from 'react';
+import { Columns3, Combine, Plus } from 'lucide-react';
+import type { ImageAsset, SplitLine } from '../types';
+
+type CropRect = { x: number; y: number; width: number; height: number };
+type CropHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+
+function clampValue(value: number, minimum: number, maximum: number) {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+function pointerInFrame(event: ReactPointerEvent<HTMLElement>, frame: HTMLDivElement) {
+  const rect = frame.getBoundingClientRect();
+  return { x: ((event.clientX - rect.left) / rect.width) * 100, y: ((event.clientY - rect.top) / rect.height) * 100 };
+}
+
+export function DirectCropPanel({ asset, onApply }: { asset: ImageAsset; onApply: (values: CropRect) => Promise<void> }) {
+  const [values, setValues] = useState<CropRect>({ x: 0, y: 0, width: asset.width, height: asset.height });
+  const [ratio, setRatio] = useState<number | null>(null);
+  const [locked, setLocked] = useState(true);
+  const frameRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ mode: 'move' | 'resize'; handle: CropHandle; start: { x: number; y: number }; initial: CropRect } | null>(null);
+  const presets = [{ label: '自由', ratio: null }, { label: '1 : 1', ratio: 1 }, { label: '4 : 3', ratio: 4 / 3 }, { label: '3 : 4', ratio: 3 / 4 }, { label: '16 : 9', ratio: 16 / 9 }];
+  const handles: CropHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+
+  useEffect(() => {
+    setValues({ x: 0, y: 0, width: asset.width, height: asset.height });
+    setRatio(null);
+  }, [asset.id, asset.width, asset.height]);
+
+  function startDrag(event: ReactPointerEvent<HTMLElement>, mode: 'move' | 'resize', handle: CropHandle = 'se') {
+    const frame = frameRef.current;
+    if (!frame) return;
+    event.preventDefault();
+    event.stopPropagation();
+    frame.setPointerCapture(event.pointerId);
+    dragRef.current = { mode, handle, start: pointerInFrame(event, frame), initial: values };
+  }
+
+  function moveCrop(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    const frame = frameRef.current;
+    if (!drag || !frame) return;
+    const point = pointerInFrame(event, frame);
+    const dx = ((point.x - drag.start.x) / 100) * asset.width;
+    const dy = ((point.y - drag.start.y) / 100) * asset.height;
+    const minimum = Math.min(24, Math.min(asset.width, asset.height));
+    if (drag.mode === 'move') {
+      setValues({ ...drag.initial, x: clampValue(drag.initial.x + dx, 0, asset.width - drag.initial.width), y: clampValue(drag.initial.y + dy, 0, asset.height - drag.initial.height) });
+      return;
+    }
+    let left = drag.initial.x;
+    let top = drag.initial.y;
+    let right = drag.initial.x + drag.initial.width;
+    let bottom = drag.initial.y + drag.initial.height;
+    if (drag.handle.includes('w')) left += dx;
+    if (drag.handle.includes('e')) right += dx;
+    if (drag.handle.includes('n')) top += dy;
+    if (drag.handle.includes('s')) bottom += dy;
+    if (right - left < minimum) {
+      if (drag.handle.includes('w')) left = right - minimum;
+      else right = left + minimum;
+    }
+    if (bottom - top < minimum) {
+      if (drag.handle.includes('n')) top = bottom - minimum;
+      else bottom = top + minimum;
+    }
+    if (ratio) {
+      const widthDriven = drag.handle.includes('e') || drag.handle.includes('w') || (!drag.handle.includes('n') && !drag.handle.includes('s'));
+      if (widthDriven) {
+        const height = (right - left) / ratio;
+        if (drag.handle.includes('n')) top = bottom - height;
+        else bottom = top + height;
+      } else {
+        const width = (bottom - top) * ratio;
+        if (drag.handle.includes('w')) left = right - width;
+        else right = left + width;
+      }
+    }
+    if (left < 0) { right -= left; left = 0; }
+    if (top < 0) { bottom -= top; top = 0; }
+    if (right > asset.width) { left -= right - asset.width; right = asset.width; }
+    if (bottom > asset.height) { top -= bottom - asset.height; bottom = asset.height; }
+    const width = clampValue(right - left, minimum, asset.width);
+    const height = clampValue(bottom - top, minimum, asset.height);
+    setValues({ x: clampValue(left, 0, asset.width - width), y: clampValue(top, 0, asset.height - height), width, height });
+  }
+
+  function endDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (dragRef.current && frameRef.current?.hasPointerCapture(event.pointerId)) frameRef.current.releasePointerCapture(event.pointerId);
+    dragRef.current = null;
+  }
+
+  return <><div className="control-section"><div className="section-label">裁剪比例</div><div className="segmented-grid">{presets.map((preset) => <button key={preset.label} className={preset.ratio && Math.abs(values.width / values.height - preset.ratio) < 0.02 ? 'is-selected' : !preset.ratio && !ratio ? 'is-selected' : ''} onClick={() => { setRatio(preset.ratio); if (!preset.ratio) { setValues({ x: 0, y: 0, width: asset.width, height: asset.height }); return; } const width = Math.min(asset.width, Math.round(asset.height * preset.ratio)); setValues({ x: Math.round((asset.width - width) / 2), y: Math.round((asset.height - width / preset.ratio) / 2), width, height: Math.round(width / preset.ratio) }); }}>{preset.label}</button>)}</div></div><div className="control-section direct-tool-section"><div className="direct-image-frame crop-interaction" ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerMove={moveCrop} onPointerUp={endDrag} onPointerCancel={endDrag}><img src={asset.url} alt="可直接拖动的裁剪预览" /><div className="crop-box" data-crop-box style={{ left: `${(values.x / asset.width) * 100}%`, top: `${(values.y / asset.height) * 100}%`, width: `${(values.width / asset.width) * 100}%`, height: `${(values.height / asset.height) * 100}%` }} onPointerDown={(event) => startDrag(event, 'move')}><span className="crop-grid-line crop-grid-line-v one" /><span className="crop-grid-line crop-grid-line-v two" /><span className="crop-grid-line crop-grid-line-h one" /><span className="crop-grid-line crop-grid-line-h two" />{handles.map((handle) => <button type="button" aria-label={`调整裁剪框 ${handle}`} className={`crop-handle ${handle}`} key={handle} onPointerDown={(event) => startDrag(event, 'resize', handle)} />)}</div></div><div className="direct-tool-caption"><span>拖动边框移动</span><span>拖动角点缩放</span></div></div><div className="control-section"><div className="section-label">裁剪区域 <span className="muted">px</span></div><div className="field-grid">{(['x', 'y', 'width', 'height'] as const).map((key) => <label className="field" key={key}><span>{key === 'x' ? '左' : key === 'y' ? '上' : key === 'width' ? '宽' : '高'}</span><div className="field-control"><input type="number" min="0" value={Math.round(values[key])} onChange={(event) => setValues((current) => ({ ...current, [key]: Number(event.target.value) }))} /></div></label>)}</div><button className={`toggle-row ${locked ? 'is-on' : ''}`} onClick={() => setLocked((value) => !value)}><span className="toggle"><span /></span><span>输入时锁定比例</span></button></div><button className="apply-button" onClick={() => void onApply(values)}>应用裁剪</button></>;
+}
+
+export function DirectSplitPanel({ asset, onApply }: { asset: ImageAsset; onApply: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void> }) {
+  const [direction, setDirection] = useState<'horizontal' | 'vertical' | 'grid'>('grid');
+  const [rows, setRows] = useState(2);
+  const [columns, setColumns] = useState(2);
+  const [addOrientation, setAddOrientation] = useState<'horizontal' | 'vertical'>('horizontal');
+  const [lines, setLines] = useState<SplitLine[]>([]);
+  const frameRef = useRef<HTMLDivElement>(null);
+  const lineDragRef = useRef<{ id: string; start: number; initial: number } | null>(null);
+
+  useEffect(() => setLines([]), [asset.id]);
+
+  function addLine(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.target instanceof Element && event.target.closest('[data-split-line]')) return;
+    const frame = frameRef.current;
+    if (!frame) return;
+    const point = pointerInFrame(event, frame);
+    setLines((current) => [...current, { id: crypto.randomUUID(), orientation: addOrientation, position: clampValue(addOrientation === 'horizontal' ? point.y : point.x, 3, 97) }]);
+  }
+
+  function startLineDrag(event: ReactPointerEvent<HTMLButtonElement>, line: SplitLine) {
+    const frame = frameRef.current;
+    if (!frame) return;
+    event.preventDefault();
+    event.stopPropagation();
+    frame.setPointerCapture(event.pointerId);
+    const point = pointerInFrame(event as unknown as ReactPointerEvent<HTMLDivElement>, frame);
+    lineDragRef.current = { id: line.id, start: line.orientation === 'horizontal' ? point.y : point.x, initial: line.position };
+  }
+
+  function moveLine(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = lineDragRef.current;
+    const frame = frameRef.current;
+    if (!drag || !frame) return;
+    const line = lines.find((item) => item.id === drag.id);
+    if (!line) return;
+    const point = pointerInFrame(event, frame);
+    const current = line.orientation === 'horizontal' ? point.y : point.x;
+    setLines((items) => items.map((item) => item.id === drag.id ? { ...item, position: clampValue(drag.initial + current - drag.start, 3, 97) } : item));
+  }
+
+  function endLineDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (lineDragRef.current && frameRef.current?.hasPointerCapture(event.pointerId)) frameRef.current.releasePointerCapture(event.pointerId);
+    lineDragRef.current = null;
+  }
+
+  function removeLine(id: string) {
+    setLines((current) => current.filter((line) => line.id !== id));
+  }
+
+  return <><div className="control-section"><div className="section-label">分割方式</div><div className="mode-cards">{[['horizontal', '横向', '一列多行'], ['vertical', '纵向', '一行多列'], ['grid', '网格', '行 × 列']].map(([value, label, detail]) => <button key={value} className={`mode-card ${direction === value ? 'is-selected' : ''}`} onClick={() => setDirection(value as typeof direction)}><span className="mode-symbol">{value === 'horizontal' ? <Columns3 size={17} /> : value === 'vertical' ? <Columns3 className="rotate-90" size={17} /> : <Combine size={17} />}</span><strong>{label}</strong><small>{detail}</small></button>)}</div></div><div className="control-section direct-tool-section"><div className="split-add-toolbar"><span>点击图片添加</span><button className={addOrientation === 'horizontal' ? 'is-selected' : ''} onClick={() => setAddOrientation('horizontal')}><Plus size={13} /> 横线</button><button className={addOrientation === 'vertical' ? 'is-selected' : ''} onClick={() => setAddOrientation('vertical')}><Plus size={13} /> 竖线</button></div><div className="direct-image-frame split-interaction" ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerDown={addLine} onPointerMove={moveLine} onPointerUp={endLineDrag} onPointerCancel={endLineDrag}>{lines.map((line) => <button type="button" aria-label={`${line.orientation === 'horizontal' ? '横向' : '纵向'}分割线`} data-split-line className={`split-line ${line.orientation}`} key={line.id} style={line.orientation === 'horizontal' ? { top: `${line.position}%` } : { left: `${line.position}%` }} onPointerDown={(event) => startLineDrag(event, line)} onDoubleClick={() => removeLine(line.id)} onContextMenu={(event) => { event.preventDefault(); removeLine(line.id); }} onKeyDown={(event) => (event.key === 'Delete' || event.key === 'Backspace') && removeLine(line.id)} />)}</div><div className="direct-tool-caption"><span>{lines.length ? `${lines.length} 条自定义分割线` : '点击图片添加分割线'}</span><span>双击或右键删除</span></div></div><div className="control-section"><div className="field-row"><label className="field"><span>{direction === 'vertical' ? '数量' : '行数'}</span><div className="field-control"><input type="number" min="1" max="12" value={rows} onChange={(event) => setRows(Number(event.target.value))} /></div></label>{direction === 'grid' && <><span className="multiply">×</span><label className="field"><span>列数</span><div className="field-control"><input type="number" min="1" max="12" value={columns} onChange={(event) => setColumns(Number(event.target.value))} /></div></label></>}</div><div className="split-visual"><span /> <span /> <span /> <span /></div></div><button className="apply-button" onClick={() => void onApply(direction, rows, columns, lines)}>生成切图</button></>;
+}
