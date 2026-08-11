@@ -13,12 +13,16 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .app-shell { min-height: 100vh; color: #161a18; background: #f7f8f5; }
 .app-shell.theme-dark { color: #f2f4ef; background: #161918; }
 .app-shell.has-workspace { height: 100dvh; min-height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
-.app-shell.has-workspace .workspace-page { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.app-shell.has-workspace .workspace-page { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding-bottom: 12px; }
 .app-shell.has-workspace .workspace-layout { flex: 1; min-height: 0; }
 .app-shell.has-workspace .tool-sidebar, .app-shell.has-workspace .preview-column, .app-shell.has-workspace .control-column { min-height: 0; }
 .app-shell.has-workspace .tool-sidebar { overflow: auto; }
 .app-shell.has-workspace .preview-stage { min-height: 0; }
-.app-shell.has-workspace .site-footer { flex: none; padding-top: 10px; padding-bottom: 12px; }
+.app-shell.has-workspace .control-column { overflow: hidden; }
+.app-shell.has-workspace .control-scroll { min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #b7c7ad transparent; }
+.app-shell.has-workspace .control-scroll::-webkit-scrollbar { width: 7px; }
+.app-shell.has-workspace .control-scroll::-webkit-scrollbar-thumb { background: #b7c7ad; border-radius: 99px; }
+.app-shell.has-workspace .site-footer { display: none; }
 .app-shell.theme-dark .topbar, .app-shell.theme-dark .workspace-page, .app-shell.theme-dark .toolbox-section, .app-shell.theme-dark .site-footer { border-color: #303632; }
 .app-shell.theme-dark .topbar, .app-shell.theme-dark .dropzone, .app-shell.theme-dark .tool-card, .app-shell.theme-dark .workspace-layout, .app-shell.theme-dark .asset-strip, .app-shell.theme-dark .tool-sidebar, .app-shell.theme-dark .control-column, .app-shell.theme-dark .preview-column, .app-shell.theme-dark .secondary-button, .app-shell.theme-dark .icon-button, .app-shell.theme-dark .field-control, .app-shell.theme-dark .select-input, .app-shell.theme-dark .preset-button, .app-shell.theme-dark .mode-card, .app-shell.theme-dark .segmented-grid button, .app-shell.theme-dark .format-pills button, .app-shell.theme-dark .action-row, .app-shell.theme-dark .popover { background: #202522; color: #f2f4ef; border-color: #3a433d; }
 .app-shell.theme-dark .hero-subtitle, .app-shell.theme-dark .tool-card small, .app-shell.theme-dark .panel-intro p, .app-shell.theme-dark .field > span, .app-shell.theme-dark .history-item small, .app-shell.theme-dark .site-footer { color: #aab4ad; }
