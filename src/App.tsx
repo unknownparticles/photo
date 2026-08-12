@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import {
@@ -142,6 +142,173 @@ function fileNameWithoutExtension(name: string) {
 }
 
 type ViewportSize = { width: number; height: number };
+
+type PreviewPoint = { x: number; y: number };
+
+type PreviewInteraction =
+  | { type: 'pan'; start: PreviewPoint; offset: PreviewPoint }
+  | { type: 'pinch'; distance: number; midpoint: PreviewPoint; zoom: number; offset: PreviewPoint }
+  | null;
+
+const MIN_PREVIEW_ZOOM = 1;
+const MAX_PREVIEW_ZOOM = 4;
+
+function distanceBetween(first: PreviewPoint, second: PreviewPoint) {
+  return Math.hypot(first.x - second.x, first.y - second.y);
+}
+
+function midpointBetween(first: PreviewPoint, second: PreviewPoint): PreviewPoint {
+  return { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
+}
+
+function clampPreviewOffset(offset: PreviewPoint, zoom: number, image: { width: number; height: number }, stage: { width: number; height: number }) {
+  const maxX = Math.max(0, (image.width * zoom - stage.width) / 2);
+  const maxY = Math.max(0, (image.height * zoom - stage.height) / 2);
+  return {
+    x: Math.max(-maxX, Math.min(maxX, offset.x)),
+    y: Math.max(-maxY, Math.min(maxY, offset.y)),
+  };
+}
+
+function PreviewImage({ asset }: { asset: ImageAsset }) {
+  const stageRef = useRef<HTMLDivElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
+  const pointersRef = useRef(new Map<number, PreviewPoint>());
+  const interactionRef = useRef<PreviewInteraction>(null);
+  const [zoom, setZoom] = useState(MIN_PREVIEW_ZOOM);
+  const [offset, setOffset] = useState<PreviewPoint>({ x: 0, y: 0 });
+
+  const measure = useCallback(() => {
+    const stage = stageRef.current;
+    const image = imageRef.current;
+    if (!stage || !image) return null;
+    return {
+      stage: { width: stage.clientWidth, height: stage.clientHeight },
+      image: { width: image.offsetWidth, height: image.offsetHeight },
+    };
+  }, []);
+
+  const updateTransform = useCallback((nextZoom: number, nextOffset: PreviewPoint) => {
+    const measured = measure();
+    const safeZoom = Math.max(MIN_PREVIEW_ZOOM, Math.min(MAX_PREVIEW_ZOOM, nextZoom));
+    const safeOffset = measured ? clampPreviewOffset(nextOffset, safeZoom, measured.image, measured.stage) : nextOffset;
+    setZoom(safeZoom);
+    setOffset(safeOffset);
+  }, [measure]);
+
+  function handleImageLoad() {
+    updateTransform(zoom, offset);
+  }
+
+  useLayoutEffect(() => {
+    const handleResize = () => updateTransform(zoom, offset);
+    const observer = new ResizeObserver(handleResize);
+    if (stageRef.current) observer.observe(stageRef.current);
+    window.addEventListener('resize', handleResize);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [offset, updateTransform, zoom]);
+
+  useEffect(() => {
+    setZoom(MIN_PREVIEW_ZOOM);
+    setOffset({ x: 0, y: 0 });
+    pointersRef.current.clear();
+    interactionRef.current = null;
+  }, [asset.id]);
+
+  function localPoint(event: React.PointerEvent<HTMLDivElement>): PreviewPoint {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  }
+
+  function setZoomAtPoint(nextZoom: number, point: PreviewPoint) {
+    const measured = measure();
+    if (!measured) return;
+    const imagePoint = {
+      x: (point.x - measured.stage.width / 2 - offset.x) / zoom,
+      y: (point.y - measured.stage.height / 2 - offset.y) / zoom,
+    };
+    const nextOffset = {
+      x: point.x - measured.stage.width / 2 - imagePoint.x * nextZoom,
+      y: point.y - measured.stage.height / 2 - imagePoint.y * nextZoom,
+    };
+    updateTransform(nextZoom, nextOffset);
+  }
+
+  function handleWheel(event: React.WheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    const factor = Math.exp(-event.deltaY * 0.002);
+    setZoomAtPoint(zoom * factor, point);
+  }
+
+  function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const point = localPoint(event);
+    pointersRef.current.set(event.pointerId, point);
+    if (pointersRef.current.size >= 2) {
+      const [first, second] = Array.from(pointersRef.current.values());
+      interactionRef.current = { type: 'pinch', distance: distanceBetween(first, second), midpoint: midpointBetween(first, second), zoom, offset };
+    } else {
+      interactionRef.current = { type: 'pan', start: point, offset };
+    }
+  }
+
+  function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    if (!pointersRef.current.has(event.pointerId)) return;
+    const point = localPoint(event);
+    pointersRef.current.set(event.pointerId, point);
+    const interaction = interactionRef.current;
+    if (!interaction) return;
+    if (interaction.type === 'pan') {
+      if (pointersRef.current.size !== 1 || zoom <= MIN_PREVIEW_ZOOM) return;
+      updateTransform(zoom, { x: interaction.offset.x + point.x - interaction.start.x, y: interaction.offset.y + point.y - interaction.start.y });
+      return;
+    }
+    if (pointersRef.current.size < 2) return;
+    const [first, second] = Array.from(pointersRef.current.values());
+    const midpoint = midpointBetween(first, second);
+    const nextZoom = interaction.zoom * (distanceBetween(first, second) / Math.max(1, interaction.distance));
+    const measured = measure();
+    if (!measured) return;
+    const imagePoint = {
+      x: (interaction.midpoint.x - measured.stage.width / 2 - interaction.offset.x) / interaction.zoom,
+      y: (interaction.midpoint.y - measured.stage.height / 2 - interaction.offset.y) / interaction.zoom,
+    };
+    updateTransform(nextZoom, {
+      x: midpoint.x - measured.stage.width / 2 - imagePoint.x * nextZoom,
+      y: midpoint.y - measured.stage.height / 2 - imagePoint.y * nextZoom,
+    });
+  }
+
+  function handlePointerEnd(event: React.PointerEvent<HTMLDivElement>) {
+    pointersRef.current.delete(event.pointerId);
+    if (pointersRef.current.size === 1) {
+      const [point] = Array.from(pointersRef.current.values());
+      interactionRef.current = { type: 'pan', start: point, offset };
+    } else if (!pointersRef.current.size) {
+      interactionRef.current = null;
+    }
+  }
+
+  return (
+    <div
+      ref={stageRef}
+      className={`preview-image-viewport ${zoom > MIN_PREVIEW_ZOOM ? 'is-zoomed' : ''}`}
+      onWheel={handleWheel}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerEnd}
+      onPointerCancel={handlePointerEnd}
+    >
+      <img ref={imageRef} className="main-preview" src={asset.url} alt={asset.name} onLoad={handleImageLoad} style={{ transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${zoom})` }} />
+    </div>
+  );
+}
 
 function readViewportSize(): ViewportSize {
   if (typeof window === 'undefined') return { width: 0, height: 0 };
@@ -727,7 +894,7 @@ function Workspace({
       <div className="asset-strip"><div className="asset-strip-label"><span className="eyebrow">WORKSPACE</span><strong>{assets.length} 张图片</strong></div><div className="asset-thumbs">{assets.map((asset, index) => <div className="asset-thumb-wrap" key={asset.id}><button className={`asset-thumb ${asset.id === activeAsset?.id ? 'is-active' : ''}`} aria-label={`选中 ${asset.name}`} aria-pressed={asset.id === activeAsset?.id} onClick={() => onSelectAsset(asset.id)}><img src={asset.url} alt={asset.name} /><span>{index + 1}</span></button><button className="asset-delete-button" title={`删除 ${asset.name}`} aria-label={`删除 ${asset.name}`} onClick={() => onDeleteAsset(asset.id)}><X size={11} /></button></div>)}<button className="add-thumb" title="添加图片" aria-label="添加图片" onClick={onAddFiles}><Plus size={17} /></button></div><div className="asset-total">总计 {formatBytes(assets.reduce((sum, asset) => sum + asset.size, 0))}</div></div>
       <div className="workspace-layout">
         <aside className="tool-sidebar"><div className="sidebar-title"><PanelLeft size={15} /><span>工具</span></div><div className="sidebar-list">{tools.map((tool) => { const ToolIcon = tool.icon; return <button className={`sidebar-tool ${activeTool === tool.id ? 'is-active' : ''}`} key={tool.id} onClick={() => onSelectTool(tool.id)} title={tool.description}><ToolIcon size={17} /><span>{tool.label}</span>{activeTool === tool.id && <span className="active-bar" />}</button>; })}</div><div className="sidebar-bottom"><ShieldCheck size={16} /><small>本地模式<br />Local only</small></div></aside>
-        <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 实时预览</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <img className="main-preview" src={activeAsset.url} alt={activeAsset.name} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeAsset && <button className="icon-button" title="删除当前图片" aria-label="删除当前图片" onClick={() => onDeleteAsset(activeAsset.id)}><Trash2 size={16} /></button>}</div></div></section>
+        <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 实时预览</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <PreviewImage asset={activeAsset} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeAsset && <button className="icon-button" title="删除当前图片" aria-label="删除当前图片" onClick={() => onDeleteAsset(activeAsset.id)}><Trash2 size={16} /></button>}</div></div></section>
         <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
       </div>
     </main>
