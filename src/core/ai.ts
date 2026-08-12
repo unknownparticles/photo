@@ -2,6 +2,7 @@ import type { AiAdapter, AiCapability, AiModelId, AiOperationOptions, AiTask, Im
 import { canvasToBlob, createAssetFromBlob, loadImage } from './image';
 
 const modelBaseUrl = import.meta.env.VITE_MODEL_BASE_URL?.trim() || new URL('models/', document.baseURI).toString();
+const ortWasmBaseUrl = new URL('ort/', document.baseURI).toString();
 const MAX_MODEL_INPUT_EDGE = 1024;
 const MAX_MODEL_OUTPUT_EDGE = 8192;
 
@@ -130,7 +131,7 @@ export class LocalAiAdapter implements AiAdapter {
     onProgress?.(0.12);
     const runtime = await import('onnxruntime-web');
     this.ort = runtime;
-    runtime.env.wasm.wasmPaths = `${modelBaseUrl}/wasm/`;
+    runtime.env.wasm.wasmPaths = ortWasmBaseUrl;
     const url = modelUrl(modelId);
     let response: Response;
     try {
