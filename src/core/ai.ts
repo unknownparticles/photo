@@ -71,6 +71,25 @@ function inputSize(session: InferenceSession, image: HTMLImageElement) {
   };
 }
 
+function modnetInputSize(image: HTMLImageElement) {
+  const reference = 512;
+  let width: number;
+  let height: number;
+  if (Math.max(image.naturalWidth, image.naturalHeight) < reference || Math.min(image.naturalWidth, image.naturalHeight) > reference) {
+    if (image.naturalWidth >= image.naturalHeight) {
+      height = reference;
+      width = Math.round((image.naturalWidth / image.naturalHeight) * reference);
+    } else {
+      width = reference;
+      height = Math.round((image.naturalHeight / image.naturalWidth) * reference);
+    }
+  } else {
+    width = image.naturalWidth;
+    height = image.naturalHeight;
+  }
+  return { width: Math.max(32, width - (width % 32)), height: Math.max(32, height - (height % 32)) };
+}
+
 function inputChannels(session: InferenceSession) {
   const input = session.inputMetadata[0] as { dimensions?: Array<number | string> } | undefined;
   const channels = Number(input?.dimensions?.[1]);
@@ -115,15 +134,16 @@ export class LocalAiAdapter implements AiAdapter {
   private runtime: 'webgpu' | 'wasm' | 'unavailable' = 'unavailable';
   private ort: OnnxRuntime | null = null;
   private sessions = new Map<AiModelId, InferenceSession>();
+  private forcedWasm = false;
 
   async capability(): Promise<AiCapability> {
     const webgpu = typeof navigator !== 'undefined' && 'gpu' in navigator;
     const wasm = typeof WebAssembly !== 'undefined';
-    this.runtime = webgpu ? 'webgpu' : wasm ? 'wasm' : 'unavailable';
+    this.runtime = this.forcedWasm || !webgpu ? wasm ? 'wasm' : 'unavailable' : 'webgpu';
     return { webgpu, wasm, runtime: this.runtime, modelConfigured: Boolean(import.meta.env.VITE_MODEL_BASE_URL) };
   }
 
-  private async session(modelId: AiModelId, onProgress?: (value: number) => void) {
+  private async session(modelId: AiModelId, onProgress?: (value: number) => void, runtimeOverride?: 'webgpu' | 'wasm') {
     const cached = this.sessions.get(modelId);
     if (cached) return cached;
     const capability = await this.capability();
@@ -146,11 +166,19 @@ export class LocalAiAdapter implements AiAdapter {
     if (!response.ok) throw new Error(`模型加载失败：HTTP ${response.status} · ${modelId}.onnx`);
     const modelData = await response.arrayBuffer();
     onProgress?.(0.3);
-    const executionProviders = capability.runtime === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm'];
+    const executionProviders = (runtimeOverride ?? capability.runtime) === 'webgpu' ? ['webgpu'] : ['wasm'];
     const next = await runtime.InferenceSession.create(modelData, { executionProviders, graphOptimizationLevel: 'all' });
     this.sessions.set(modelId, next);
     onProgress?.(1);
     return next;
+  }
+
+  private async switchToWasm(modelId: AiModelId, onProgress?: (value: number) => void) {
+    const previous = this.sessions.get(modelId);
+    this.sessions.delete(modelId);
+    await previous?.release().catch(() => undefined);
+    this.forcedWasm = true;
+    return this.session(modelId, onProgress, 'wasm');
   }
 
   async load(modelId: AiOperationOptions['modelId'], onProgress?: (value: number) => void) {
@@ -159,11 +187,12 @@ export class LocalAiAdapter implements AiAdapter {
 
   async run(input: ImageAsset, options: AiOperationOptions, signal?: AbortSignal): Promise<ProcessedAsset> {
     abortIfNeeded(signal);
-    const session = await this.session(options.modelId);
+    let session = await this.session(options.modelId);
     const runtime = this.ort;
     if (!runtime) throw new Error('本地 AI 运行环境尚未初始化');
     const image = await loadImage(input.blob);
-    const size = inputSize(session, image);
+    const task = taskForModel(options.modelId);
+    const size = task === 'remove-background' ? modnetInputSize(image) : inputSize(session, image);
     const inputCanvas = document.createElement('canvas');
     inputCanvas.width = size.width;
     inputCanvas.height = size.height;
@@ -178,29 +207,60 @@ export class LocalAiAdapter implements AiAdapter {
       const red = pixels[index * 4] / 255;
       const green = pixels[index * 4 + 1] / 255;
       const blue = pixels[index * 4 + 2] / 255;
-      data[index] = channels === 1 ? (red + green + blue) / 3 : red;
+      const normalize = task === 'remove-background' ? (value: number) => value * 2 - 1 : (value: number) => value;
+      data[index] = channels === 1 ? normalize((red + green + blue) / 3) : normalize(red);
       if (channels === 3) {
-        data[plane + index] = green;
-        data[plane * 2 + index] = blue;
+        data[plane + index] = normalize(green);
+        data[plane * 2 + index] = normalize(blue);
       }
     }
     const tensor = new runtime.Tensor('float32', data, [1, channels, size.height, size.width]);
     abortIfNeeded(signal);
-    const outputs = await session.run({ [session.inputNames[0]]: tensor });
+    let outputs: Record<string, TensorOutput>;
+    try {
+      outputs = await session.run({ [session.inputNames[0]]: tensor }) as Record<string, TensorOutput>;
+    } catch (error) {
+      if (this.runtime !== 'webgpu' || this.forcedWasm || typeof WebAssembly === 'undefined') throw error;
+      session = await this.switchToWasm(options.modelId);
+      const wasmSize = taskForModel(options.modelId) === 'remove-background' ? modnetInputSize(image) : inputSize(session, image);
+      const wasmCanvas = document.createElement('canvas');
+      wasmCanvas.width = wasmSize.width;
+      wasmCanvas.height = wasmSize.height;
+      const wasmContext = wasmCanvas.getContext('2d');
+      if (!wasmContext) throw new Error('当前浏览器无法创建 AI 输入画布');
+      wasmContext.drawImage(image, 0, 0, wasmSize.width, wasmSize.height);
+      const wasmPixels = wasmContext.getImageData(0, 0, wasmSize.width, wasmSize.height).data;
+      const wasmPlane = wasmSize.width * wasmSize.height;
+      const wasmChannels = inputChannels(session);
+      const wasmData = new Float32Array(wasmPlane * wasmChannels);
+      const wasmTask = taskForModel(options.modelId);
+      for (let index = 0; index < wasmPlane; index += 1) {
+        const red = wasmPixels[index * 4] / 255;
+        const green = wasmPixels[index * 4 + 1] / 255;
+        const blue = wasmPixels[index * 4 + 2] / 255;
+        const normalize = wasmTask === 'remove-background' ? (value: number) => value * 2 - 1 : (value: number) => value;
+        wasmData[index] = wasmChannels === 1 ? normalize((red + green + blue) / 3) : normalize(red);
+        if (wasmChannels === 3) {
+          wasmData[wasmPlane + index] = normalize(green);
+          wasmData[wasmPlane * 2 + index] = normalize(blue);
+        }
+      }
+      const wasmTensor = new runtime.Tensor('float32', wasmData, [1, wasmChannels, wasmSize.height, wasmSize.width]);
+      outputs = await session.run({ [session.inputNames[0]]: wasmTensor }) as Record<string, TensorOutput>;
+    }
     abortIfNeeded(signal);
     const output = outputs[session.outputNames[0]] as TensorOutput | undefined;
     if (!output) throw new Error('AI 模型没有返回图像结果');
-    const task = taskForModel(options.modelId);
     const outputImage = outputCanvas(output, task);
     if (task === 'remove-background') {
       const original = document.createElement('canvas');
-      original.width = outputImage.width;
-      original.height = outputImage.height;
+      original.width = image.naturalWidth;
+      original.height = image.naturalHeight;
       const originalContext = original.getContext('2d');
       if (!originalContext) throw new Error('当前浏览器无法创建抠图画布');
       originalContext.drawImage(image, 0, 0, original.width, original.height);
       originalContext.globalCompositeOperation = 'destination-in';
-      originalContext.drawImage(outputImage, 0, 0);
+      originalContext.drawImage(outputImage, 0, 0, original.width, original.height);
       const blob = await canvasToBlob(original, 'image/png');
       return createAssetFromBlob(blob, `${input.name.replace(/\.[^/.]+$/, '')}-MODNet抠图.png`);
     }
