@@ -2,7 +2,9 @@ import type { AiAdapter, AiCapability, AiModelId, AiOperationOptions, AiTask, Im
 import { canvasToBlob, createAssetFromBlob, loadImage } from './image';
 
 const AI_RESOURCE_REVISION = '28e9cf4f2034c8cde9a332d1c6e21faf60b0b218';
+const ORT_WASM_VERSION = '1.27.0';
 const DEFAULT_AI_RESOURCE_BASE_URL = `https://cdn.jsdelivr.net/gh/unknownparticles/photo@${AI_RESOURCE_REVISION}/resources/ai/`;
+const DEFAULT_ORT_WASM_BASE_URL = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_WASM_VERSION}/dist/`;
 
 function resourceBaseUrl(value: string | undefined, fallback: string) {
   const url = new URL(value?.trim() || fallback, document.baseURI).toString();
@@ -10,7 +12,7 @@ function resourceBaseUrl(value: string | undefined, fallback: string) {
 }
 
 const modelBaseUrl = resourceBaseUrl(import.meta.env.VITE_MODEL_BASE_URL, new URL('models/', DEFAULT_AI_RESOURCE_BASE_URL).toString());
-const ortWasmBaseUrl = resourceBaseUrl(import.meta.env.VITE_ORT_WASM_BASE_URL, new URL('ort/', DEFAULT_AI_RESOURCE_BASE_URL).toString());
+const ortWasmBaseUrl = resourceBaseUrl(import.meta.env.VITE_ORT_WASM_BASE_URL, DEFAULT_ORT_WASM_BASE_URL);
 const MAX_MODEL_INPUT_EDGE = 1024;
 const MAX_MODEL_OUTPUT_EDGE = 8192;
 
