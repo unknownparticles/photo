@@ -4,6 +4,9 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
   base: '/photo/',
+  resolve: {
+    conditions: ['onnxruntime-web-use-extern-wasm'],
+  },
   plugins: [
     react(),
     VitePWA({
