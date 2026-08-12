@@ -2,7 +2,8 @@ import type { AiAdapter, AiCapability, AiModelId, AiOperationOptions, AiTask, Im
 import { canvasToBlob, createAssetFromBlob, loadImage } from './image';
 
 const modelBaseUrl = import.meta.env.VITE_MODEL_BASE_URL ?? '/photo/models';
-const MAX_MODEL_EDGE = 1024;
+const MAX_MODEL_INPUT_EDGE = 1024;
+const MAX_MODEL_OUTPUT_EDGE = 8192;
 
 type OnnxRuntime = typeof import('onnxruntime-web');
 type InferenceSession = Awaited<ReturnType<OnnxRuntime['InferenceSession']['create']>>;
@@ -22,7 +23,7 @@ function abortIfNeeded(signal?: AbortSignal) {
 
 function finiteDimension(value: number | string | undefined, fallback: number) {
   const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.min(MAX_MODEL_EDGE, Math.round(parsed)) : fallback;
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(MAX_MODEL_INPUT_EDGE, Math.round(parsed)) : fallback;
 }
 
 function outputValue(value: number, min: number, max: number) {
@@ -56,7 +57,7 @@ function outputRange(output: TensorOutput) {
 function inputSize(session: InferenceSession, image: HTMLImageElement) {
   const input = session.inputMetadata[0] as { dimensions?: Array<number | string> } | undefined;
   const dimensions = input?.dimensions ?? [];
-  const fallbackScale = Math.min(1, MAX_MODEL_EDGE / Math.max(image.naturalWidth, image.naturalHeight));
+  const fallbackScale = Math.min(1, MAX_MODEL_INPUT_EDGE / Math.max(image.naturalWidth, image.naturalHeight));
   const fallbackWidth = Math.max(1, Math.round(image.naturalWidth * fallbackScale));
   const fallbackHeight = Math.max(1, Math.round(image.naturalHeight * fallbackScale));
   return {
@@ -65,9 +66,15 @@ function inputSize(session: InferenceSession, image: HTMLImageElement) {
   };
 }
 
+function inputChannels(session: InferenceSession) {
+  const input = session.inputMetadata[0] as { dimensions?: Array<number | string> } | undefined;
+  const channels = Number(input?.dimensions?.[1]);
+  return channels === 1 ? 1 : 3;
+}
+
 function outputCanvas(output: TensorOutput, task: AiTask) {
   const shape = outputShape(output.dims);
-  if (shape.width < 1 || shape.height < 1 || shape.width > MAX_MODEL_EDGE || shape.height > MAX_MODEL_EDGE) throw new Error('AI 模型输出尺寸不可用');
+  if (shape.width < 1 || shape.height < 1 || shape.width > MAX_MODEL_OUTPUT_EDGE || shape.height > MAX_MODEL_OUTPUT_EDGE) throw new Error('AI 模型输出尺寸不可用');
   const range = outputRange(output);
   const canvas = document.createElement('canvas');
   canvas.width = shape.width;
@@ -149,13 +156,19 @@ export class LocalAiAdapter implements AiAdapter {
     inputContext.drawImage(image, 0, 0, size.width, size.height);
     const pixels = inputContext.getImageData(0, 0, size.width, size.height).data;
     const plane = size.width * size.height;
-    const data = new Float32Array(plane * 3);
+    const channels = inputChannels(session);
+    const data = new Float32Array(plane * channels);
     for (let index = 0; index < plane; index += 1) {
-      data[index] = pixels[index * 4] / 255;
-      data[plane + index] = pixels[index * 4 + 1] / 255;
-      data[plane * 2 + index] = pixels[index * 4 + 2] / 255;
+      const red = pixels[index * 4] / 255;
+      const green = pixels[index * 4 + 1] / 255;
+      const blue = pixels[index * 4 + 2] / 255;
+      data[index] = channels === 1 ? (red + green + blue) / 3 : red;
+      if (channels === 3) {
+        data[plane + index] = green;
+        data[plane * 2 + index] = blue;
+      }
     }
-    const tensor = new runtime.Tensor('float32', data, [1, 3, size.height, size.width]);
+    const tensor = new runtime.Tensor('float32', data, [1, channels, size.height, size.width]);
     abortIfNeeded(signal);
     const outputs = await session.run({ [session.inputNames[0]]: tensor });
     abortIfNeeded(signal);
