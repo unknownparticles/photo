@@ -1,8 +1,15 @@
 import type { AiAdapter, AiCapability, AiModelId, AiOperationOptions, AiTask, ImageAsset, ProcessedAsset } from '../types';
 import { canvasToBlob, createAssetFromBlob, loadImage } from './image';
 
-const modelBaseUrl = import.meta.env.VITE_MODEL_BASE_URL?.trim() || new URL('models/', document.baseURI).toString();
-const ortWasmBaseUrl = new URL('ort/', document.baseURI).toString();
+const AI_RESOURCE_REVISION = '28e9cf4f2034c8cde9a332d1c6e21faf60b0b218';
+const DEFAULT_AI_RESOURCE_BASE_URL = `https://cdn.jsdelivr.net/gh/unknownparticles/photo@${AI_RESOURCE_REVISION}/resources/ai/`;
+
+function resourceBaseUrl(value: string | undefined, fallback: string) {
+  return new URL(value?.trim() || fallback, document.baseURI).toString();
+}
+
+const modelBaseUrl = resourceBaseUrl(import.meta.env.VITE_MODEL_BASE_URL, new URL('models/', DEFAULT_AI_RESOURCE_BASE_URL).toString());
+const ortWasmBaseUrl = resourceBaseUrl(import.meta.env.VITE_ORT_WASM_BASE_URL, new URL('ort/', DEFAULT_AI_RESOURCE_BASE_URL).toString());
 const MAX_MODEL_INPUT_EDGE = 1024;
 const MAX_MODEL_OUTPUT_EDGE = 8192;
 
@@ -57,6 +64,39 @@ function outputRange(output: TensorOutput) {
     max = Math.max(max, Number(value));
   }
   return { min, max };
+}
+
+async function readResponse(response: Response, onProgress?: (value: number) => void) {
+  if (!response.body) {
+    const data = await response.arrayBuffer();
+    onProgress?.(0.48);
+    return data;
+  }
+  const reader = response.body.getReader();
+  const contentLength = Number(response.headers.get('content-length'));
+  const chunks: Uint8Array[] = [];
+  const data = Number.isFinite(contentLength) && contentLength > 0 ? new Uint8Array(contentLength) : null;
+  let received = 0;
+  while (true) {
+    const part = await reader.read();
+    if (part.done) break;
+    if (data) data.set(part.value, received);
+    else chunks.push(part.value);
+    received += part.value.byteLength;
+    if (Number.isFinite(contentLength) && contentLength > 0) onProgress?.(0.12 + Math.min(1, received / contentLength) * 0.36);
+  }
+  if (data) {
+    onProgress?.(0.48);
+    return data.buffer;
+  }
+  const merged = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  onProgress?.(0.48);
+  return merged.buffer;
 }
 
 function inputSize(session: InferenceSession, image: HTMLImageElement) {
@@ -161,11 +201,11 @@ export class LocalAiAdapter implements AiAdapter {
     }
     const contentType = response.headers.get('content-type') ?? '';
     if (response.status === 404 || contentType.includes('text/html')) {
-      throw new Error(`缺少模型文件：${modelId}.onnx。请将它放入 public/models/，或配置 VITE_MODEL_BASE_URL`);
+      throw new Error(`缺少模型文件：${modelId}.onnx。请配置 VITE_MODEL_BASE_URL，或自托管 resources/ai/models/`);
     }
     if (!response.ok) throw new Error(`模型加载失败：HTTP ${response.status} · ${modelId}.onnx`);
-    const modelData = await response.arrayBuffer();
-    onProgress?.(0.3);
+    const modelData = await readResponse(response, onProgress);
+    onProgress?.(0.52);
     const executionProviders = (runtimeOverride ?? capability.runtime) === 'webgpu' ? ['webgpu'] : ['wasm'];
     const next = await runtime.InferenceSession.create(modelData, { executionProviders, graphOptimizationLevel: 'all' });
     this.sessions.set(modelId, next);

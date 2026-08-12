@@ -121,6 +121,12 @@ const aiTasks: Array<{ id: AiTask; label: string; description: string; icon: Luc
   { id: 'upscale', label: 'ESPCN 超分', description: '细节放大与恢复', icon: Maximize2, model: 'espcn' },
 ];
 
+const aiModelDownloadSizes: Record<AiModelId, string> = {
+  modnet: '约 26 MB',
+  'espcn-2x': '约 87 KB',
+  'espcn-4x': '约 101 KB',
+};
+
 const aiTaskLabels = Object.fromEntries(aiTasks.map((task) => [task.id, task.label])) as Record<AiTask, string>;
 
 function aiModelId(task: AiTask, scale = 2): AiModelId {
@@ -1248,8 +1254,8 @@ function AiPanel({ asset, onApply, setNotice }: { asset: ImageAsset; onApply: (r
     setSourceName(asset.name);
     pendingResultRef.current = true;
     try {
-      await aiAdapter.load(modelId, (value) => setProgress(value));
-      setProgress(0.76);
+      await aiAdapter.load(modelId, (value) => setProgress(value * 0.72));
+      setProgress(0.78);
       await onApply({ mode: 'model', task, scale });
       setProgress(1);
     } catch (error) {
@@ -1271,11 +1277,11 @@ function AiPanel({ asset, onApply, setNotice }: { asset: ImageAsset; onApply: (r
     <div className="ai-model-note"><ShieldCheck size={15} /><span><strong>本地推理</strong><small>WebGPU 优先 · WASM 自动降级 · 无需上传原图</small></span></div>
     <div className="control-section"><div className="section-label">选择模型</div><div className="ai-task-grid">{aiTasks.map((item) => { const TaskIcon = item.icon; return <button type="button" key={item.id} className={`ai-task-card ${task === item.id ? 'is-selected' : ''}`} onClick={() => setTask(item.id)}><TaskIcon size={17} /><span><strong>{item.label}</strong><small>{item.description}</small><em>{item.model.toUpperCase()} · ONNX</em></span>{task === item.id && <Check size={14} />}</button>; })}</div></div>
     {task === 'upscale' && <div className="control-section"><div className="section-label">输出倍率</div><div className="segmented-grid two"><button type="button" className={scale === 2 ? 'is-selected' : ''} onClick={() => setScale(2)}>2x 标准</button><button type="button" className={scale === 4 ? 'is-selected' : ''} onClick={() => setScale(4)}>4x 高清</button></div></div>}
-    <div className="ai-status"><div className={`ai-orb ${capability?.runtime === 'unavailable' ? 'is-muted' : ''}`}><WandSparkles size={20} /></div><div><strong>{capability ? capability.runtime === 'webgpu' ? 'WebGPU 已就绪' : capability.runtime === 'wasm' ? 'WASM 兼容模式' : '当前设备不支持' : '正在检测本机能力'}</strong><small>{capability?.runtime === 'webgpu' ? 'GPU 加速可用，处理更快' : '首次运行时才加载模型文件'}</small></div><span className="ai-runtime-chip">{capability?.runtime === 'webgpu' ? 'GPU' : 'LOCAL'}</span></div>
+    <div className="ai-status"><div className={`ai-orb ${capability?.runtime === 'unavailable' ? 'is-muted' : ''}`}><WandSparkles size={20} /></div><div><strong>{capability ? capability.runtime === 'webgpu' ? 'WebGPU 已就绪' : capability.runtime === 'wasm' ? 'WASM 兼容模式' : '当前设备不支持' : '正在检测本机能力'}</strong><small>{capability?.runtime === 'webgpu' ? '首次使用下载模型，之后复用浏览器缓存' : capability?.runtime === 'wasm' ? '首次使用下载模型和运行时，之后复用浏览器缓存' : '按需加载本地模型，不上传原图'}</small></div><span className="ai-runtime-chip">{capability?.runtime === 'webgpu' ? 'GPU' : 'LOCAL'}</span></div>
     <div className="ai-compare"><div className="ai-compare-toolbar"><div><span className="section-label">前后对比</span><small>{sourceName} → {isSameAsset ? '等待处理' : asset.name}</small></div><div className="segmented-control"><button type="button" className={compareMode === 'before' ? 'is-selected' : ''} onClick={() => setCompareMode('before')}>原图</button><button type="button" className={compareMode === 'after' ? 'is-selected' : ''} onClick={() => setCompareMode('after')}>结果</button></div></div><div className="ai-compare-stage"><img src={compareMode === 'before' ? sourceUrl : asset.url} alt={compareMode === 'before' ? 'AI 处理前原图' : 'AI 处理后结果'} />{task === 'remove-background' && compareMode === 'after' && !isSameAsset && <span className="transparency-label">透明背景</span>}</div><div className="ai-compare-meta"><span>{compareMode === 'before' ? `${asset.originalWidth} × ${asset.originalHeight}` : `${asset.width} × ${asset.height}`}</span><span>{compareMode === 'before' ? '处理前' : isSameAsset ? '尚未运行' : outputLabel}</span></div></div>
     <div className="ai-progress" aria-hidden={!loading}><div><span>{loading ? `正在准备 ${selectedTask.label}` : `按需加载 ${selectedTask.model.toUpperCase()} 模型`}</span><strong>{loading ? `${Math.round(progress * 100)}%` : '就绪'}</strong></div><div className="ai-progress-track"><span style={{ width: `${loading ? Math.round(progress * 100) : 0}%` }} /></div></div>
     <div className="ai-action-group"><button className="apply-button" type="button" onClick={() => void runModel()} disabled={loading}><WandSparkles size={17} />{loading ? '本地处理中…' : `加载并运行 ${selectedTask.label}`}<ArrowRightLeft size={15} /></button>{!isSameAsset && <button className="download-result-button" type="button" onClick={downloadResult}><Download size={16} /> 下载处理结果</button>}</div>
-    <div className="ai-footnote"><Info size={14} /><span>模型文件：<code>{modelId}.onnx</code> · 路径可通过 <code>VITE_MODEL_BASE_URL</code> 配置</span></div>
+    <div className="ai-footnote"><Info size={14} /><span>首次下载：<code>{modelId}.onnx</code> · {aiModelDownloadSizes[modelId]} · 可用 <code>VITE_MODEL_BASE_URL</code> 自托管</span></div>
   </>;
 }
 
