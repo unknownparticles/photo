@@ -5,7 +5,8 @@ const AI_RESOURCE_REVISION = '28e9cf4f2034c8cde9a332d1c6e21faf60b0b218';
 const DEFAULT_AI_RESOURCE_BASE_URL = `https://cdn.jsdelivr.net/gh/unknownparticles/photo@${AI_RESOURCE_REVISION}/resources/ai/`;
 
 function resourceBaseUrl(value: string | undefined, fallback: string) {
-  return new URL(value?.trim() || fallback, document.baseURI).toString();
+  const url = new URL(value?.trim() || fallback, document.baseURI).toString();
+  return url.endsWith('/') ? url : `${url}/`;
 }
 
 const modelBaseUrl = resourceBaseUrl(import.meta.env.VITE_MODEL_BASE_URL, new URL('models/', DEFAULT_AI_RESOURCE_BASE_URL).toString());
