@@ -8,16 +8,8 @@ type OnnxRuntime = typeof import('onnxruntime-web');
 type InferenceSession = Awaited<ReturnType<OnnxRuntime['InferenceSession']['create']>>;
 type TensorOutput = { data: Float32Array | Uint8Array | Int32Array; dims: readonly number[] };
 
-const taskLabels: Record<AiTask, string> = {
-  'remove-background': '抠图',
-  upscale: '超分',
-  enhance: '增强',
-  denoise: '去噪',
-};
-
 function taskForModel(modelId: AiModelId): AiTask {
-  if (modelId === 'upscale-2x' || modelId === 'upscale-4x') return 'upscale';
-  return modelId;
+  return modelId === 'modnet' ? 'remove-background' : 'upscale';
 }
 
 function clamp(value: number, min = 0, max = 255) {
@@ -181,10 +173,11 @@ export class LocalAiAdapter implements AiAdapter {
       originalContext.globalCompositeOperation = 'destination-in';
       originalContext.drawImage(outputImage, 0, 0);
       const blob = await canvasToBlob(original, 'image/png');
-      return createAssetFromBlob(blob, `${input.name.replace(/\.[^/.]+$/, '')}-AI抠图.png`);
+      return createAssetFromBlob(blob, `${input.name.replace(/\.[^/.]+$/, '')}-MODNet抠图.png`);
     }
     const blob = await canvasToBlob(outputImage, 'image/png');
-    return createAssetFromBlob(blob, `${input.name.replace(/\.[^/.]+$/, '')}-AI${taskLabels[task]}.png`);
+    const scale = options.modelId === 'espcn-4x' ? 4 : 2;
+    return createAssetFromBlob(blob, `${input.name.replace(/\.[^/.]+$/, '')}-ESPCN${scale}x.png`);
   }
 }
 

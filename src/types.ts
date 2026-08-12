@@ -5,6 +5,7 @@ export type ToolId =
   | 'merge'
   | 'compress'
   | 'convert'
+  | 'matting'
   | 'ai'
   | 'edit'
   | 'watermark'
