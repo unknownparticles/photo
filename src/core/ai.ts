@@ -60,8 +60,8 @@ function outputRange(output: TensorOutput) {
 }
 
 function inputSize(session: InferenceSession, image: HTMLImageElement) {
-  const input = session.inputMetadata[0] as { dimensions?: Array<number | string> } | undefined;
-  const dimensions = input?.dimensions ?? [];
+  const input = session.inputMetadata[0] as { dimensions?: Array<number | string>; shape?: Array<number | string> } | undefined;
+  const dimensions = input?.shape ?? input?.dimensions ?? [];
   const fallbackScale = Math.min(1, MAX_MODEL_INPUT_EDGE / Math.max(image.naturalWidth, image.naturalHeight));
   const fallbackWidth = Math.max(1, Math.round(image.naturalWidth * fallbackScale));
   const fallbackHeight = Math.max(1, Math.round(image.naturalHeight * fallbackScale));
@@ -91,8 +91,8 @@ function modnetInputSize(image: HTMLImageElement) {
 }
 
 function inputChannels(session: InferenceSession) {
-  const input = session.inputMetadata[0] as { dimensions?: Array<number | string> } | undefined;
-  const channels = Number(input?.dimensions?.[1]);
+  const input = session.inputMetadata[0] as { dimensions?: Array<number | string>; shape?: Array<number | string> } | undefined;
+  const channels = Number((input?.shape ?? input?.dimensions)?.[1]);
   return channels === 1 ? 1 : 3;
 }
 
