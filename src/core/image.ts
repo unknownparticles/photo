@@ -66,31 +66,118 @@ export function canvasToBlob(canvas: HTMLCanvasElement, type: ExportFormat = 'im
   });
 }
 
-export async function normalizeImageOrientation(blob: Blob): Promise<Blob> {
-  let rotation;
+type ExifOrientation = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+
+type JpegOrientationInfo = {
+  orientation: ExifOrientation;
+  valueOffset: number;
+  littleEndian: boolean;
+};
+
+function validExifOrientation(value: number): value is ExifOrientation {
+  return Number.isInteger(value) && value >= 1 && value <= 8;
+}
+
+function readJpegOrientationInfo(bytes: Uint8Array): JpegOrientationInfo | undefined {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return undefined;
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 2;
+  while (offset + 4 <= bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    while (bytes[offset] === 0xff) offset += 1;
+    const marker = bytes[offset];
+    offset += 1;
+    if (marker === 0xda || marker === 0xd9) break;
+    if (marker === 0x00 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (offset + 2 > bytes.length) break;
+    const segmentLength = view.getUint16(offset);
+    if (segmentLength < 2 || offset + segmentLength > bytes.length) break;
+
+    if (marker === 0xe1 && segmentLength >= 10 && view.getUint32(offset + 2) === 0x45786966 && view.getUint16(offset + 6) === 0) {
+      const tiffStart = offset + 8;
+      if (tiffStart + 8 > bytes.length) return undefined;
+      const byteOrder = view.getUint16(tiffStart);
+      const littleEndian = byteOrder === 0x4949;
+      if (!littleEndian && byteOrder !== 0x4d4d) return undefined;
+      if (view.getUint16(tiffStart + 2, littleEndian) !== 0x002a) return undefined;
+      const ifdOffset = view.getUint32(tiffStart + 4, littleEndian);
+      const ifdStart = tiffStart + ifdOffset;
+      if (ifdStart + 2 > bytes.length) return undefined;
+      const entryCount = view.getUint16(ifdStart, littleEndian);
+      for (let index = 0; index < entryCount; index += 1) {
+        const entryStart = ifdStart + 2 + index * 12;
+        if (entryStart + 12 > bytes.length) return undefined;
+        if (view.getUint16(entryStart, littleEndian) !== 0x0112) continue;
+        if (view.getUint16(entryStart + 2, littleEndian) !== 3 || view.getUint32(entryStart + 4, littleEndian) !== 1) return undefined;
+        const orientation = view.getUint16(entryStart + 8, littleEndian);
+        return validExifOrientation(orientation) ? { orientation, valueOffset: entryStart + 8, littleEndian } : undefined;
+      }
+      return undefined;
+    }
+    offset += segmentLength;
+  }
+  return undefined;
+}
+
+export function readJpegOrientation(bytes: Uint8Array): number | undefined {
+  return readJpegOrientationInfo(bytes)?.orientation;
+}
+
+async function readImageOrientation(blob: Blob): Promise<ExifOrientation | undefined> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const jpegInfo = readJpegOrientationInfo(bytes);
+  if (jpegInfo) return jpegInfo.orientation;
   try {
     const exifr = await import('exifr');
-    rotation = await exifr.rotation(blob);
+    const orientation = await exifr.orientation(blob);
+    return orientation !== undefined && validExifOrientation(orientation) ? orientation : undefined;
   } catch {
-    return blob;
+    return undefined;
   }
-  if (!rotation || (rotation.deg === 0 && rotation.scaleX === 1 && rotation.scaleY === 1)) return blob;
+}
 
-  const image = await loadImage(blob);
+async function neutralizeJpegOrientation(blob: Blob, orientation: ExifOrientation): Promise<Blob> {
+  if (orientation === 1) return blob;
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const info = readJpegOrientationInfo(bytes);
+  if (!info) return blob;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  view.setUint16(info.valueOffset, 1, info.littleEndian);
+  view.setUint16(info.valueOffset + 2, 0, info.littleEndian);
+  return new Blob([bytes], { type: blob.type || 'image/jpeg' });
+}
+
+function setExifOrientationTransform(context: CanvasRenderingContext2D, orientation: ExifOrientation, width: number, height: number) {
+  switch (orientation) {
+    case 2: context.setTransform(-1, 0, 0, 1, width, 0); break;
+    case 3: context.setTransform(-1, 0, 0, -1, width, height); break;
+    case 4: context.setTransform(1, 0, 0, -1, 0, height); break;
+    case 5: context.setTransform(0, 1, 1, 0, 0, 0); break;
+    case 6: context.setTransform(0, 1, -1, 0, height, 0); break;
+    case 7: context.setTransform(0, -1, -1, 0, height, width); break;
+    case 8: context.setTransform(0, -1, 1, 0, 0, width); break;
+    default: context.setTransform(1, 0, 0, 1, 0, 0);
+  }
+}
+
+export async function normalizeImageOrientation(blob: Blob): Promise<Blob> {
+  const orientation = await readImageOrientation(blob);
+  if (!orientation || orientation === 1) return blob;
+
+  const image = await loadImage(await neutralizeJpegOrientation(blob, orientation));
   const canvas = document.createElement('canvas');
-  canvas.width = rotation.dimensionSwapped ? image.naturalHeight : image.naturalWidth;
-  canvas.height = rotation.dimensionSwapped ? image.naturalWidth : image.naturalHeight;
+  const dimensionSwapped = orientation >= 5;
+  canvas.width = dimensionSwapped ? image.naturalHeight : image.naturalWidth;
+  canvas.height = dimensionSwapped ? image.naturalWidth : image.naturalHeight;
   const context = canvas.getContext('2d');
   if (!context) throw new Error('当前浏览器无法创建图片方向校正画布');
 
-  if (rotation.canvas) {
-    context.translate(canvas.width / 2, canvas.height / 2);
-    context.rotate(rotation.rad);
-    context.scale(rotation.scaleX, rotation.scaleY);
-    context.drawImage(image, -image.naturalWidth / 2, -image.naturalHeight / 2);
-  } else {
-    context.drawImage(image, 0, 0);
-  }
+  setExifOrientationTransform(context, orientation, image.naturalWidth, image.naturalHeight);
+  context.drawImage(image, 0, 0);
 
   const type = blob.type === 'image/jpeg' ? 'image/jpeg' : blob.type === 'image/webp' ? 'image/webp' : 'image/png';
   return canvasToBlob(canvas, type, type === 'image/jpeg' ? 0.94 : undefined);
