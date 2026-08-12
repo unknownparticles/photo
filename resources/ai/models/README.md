@@ -6,4 +6,4 @@
 - `espcn-2x.onnx`：ESPCN 2 倍超分
 - `espcn-4x.onnx`：ESPCN 4 倍超分
 
-模型不会随前端代码自动生成，也不会上传原图。生产环境默认通过固定版本的 jsDelivr 地址访问；若要自托管，请将此目录发布为静态目录并通过 `VITE_MODEL_BASE_URL` 指向它。
+模型不会随前端代码自动生成，也不会上传原图。生产环境默认通过固定提交的 GitHub Raw 地址访问；若要自托管，请将此目录发布为静态目录并通过 `VITE_MODEL_BASE_URL` 指向它。
