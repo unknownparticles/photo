@@ -95,33 +95,15 @@ export async function cropAsset(asset: ImageAsset, x: number, y: number, width: 
   return createAssetFromBlob(blob, addSuffix(asset.name, label));
 }
 
-function hexToRgb(hex: string): [number, number, number] {
-  const value = hex.replace('#', '');
-  const normalized = value.length === 3 ? value.split('').map((part) => `${part}${part}`).join('') : value;
-  return [Number.parseInt(normalized.slice(0, 2), 16), Number.parseInt(normalized.slice(2, 4), 16), Number.parseInt(normalized.slice(4, 6), 16)];
-}
-
-function pixelDistance(red: number, green: number, blue: number, target: [number, number, number]) {
-  const redDelta = red - target[0];
-  const greenDelta = green - target[1];
-  const blueDelta = blue - target[2];
-  return Math.sqrt(redDelta * redDelta + greenDelta * greenDelta + blueDelta * blueDelta) / 441.67295593;
-}
-
-export async function createIdPhotoAsset(asset: ImageAsset, crop: { x: number; y: number; width: number; height: number }, background: string) {
+export async function estimateCornerColor(asset: ImageAsset): Promise<[number, number, number]> {
   const image = await loadImage(asset.blob);
-  const safeX = Math.max(0, Math.min(Math.round(crop.x), image.naturalWidth - 1));
-  const safeY = Math.max(0, Math.min(Math.round(crop.y), image.naturalHeight - 1));
-  const safeWidth = Math.max(1, Math.min(Math.round(crop.width), image.naturalWidth - safeX));
-  const safeHeight = Math.max(1, Math.min(Math.round(crop.height), image.naturalHeight - safeY));
-  const size = canvasSize(safeWidth, safeHeight);
+  const size = canvasSize(image.naturalWidth, image.naturalHeight);
   const canvas = document.createElement('canvas');
   canvas.width = size.width;
   canvas.height = size.height;
   const context = canvas.getContext('2d');
   if (!context) throw new Error('当前浏览器无法创建画布');
-  context.drawImage(image, safeX, safeY, safeWidth, safeHeight, 0, 0, canvas.width, canvas.height);
-
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
   const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
   const corners = [0, canvas.width - 1, (canvas.height - 1) * canvas.width, canvas.width * canvas.height - 1];
   const target: [number, number, number] = [0, 0, 0];
@@ -133,43 +115,11 @@ export async function createIdPhotoAsset(asset: ImageAsset, crop: { x: number; y
   target[0] = Math.round(target[0] / corners.length);
   target[1] = Math.round(target[1] / corners.length);
   target[2] = Math.round(target[2] / corners.length);
-  const replacement = hexToRgb(background);
-  const threshold = 0.2;
-  const visited = new Uint8Array(canvas.width * canvas.height);
-  const backgroundMask = new Uint8Array(canvas.width * canvas.height);
-  const stack: number[] = [];
-  const pushIfBackground = (index: number) => {
-    if (visited[index]) return;
-    visited[index] = 1;
-    if (pixelDistance(pixels.data[index * 4], pixels.data[index * 4 + 1], pixels.data[index * 4 + 2], target) <= threshold) stack.push(index);
-  };
-  for (let x = 0; x < canvas.width; x += 1) {
-    pushIfBackground(x);
-    pushIfBackground((canvas.height - 1) * canvas.width + x);
-  }
-  for (let y = 1; y < canvas.height - 1; y += 1) {
-    pushIfBackground(y * canvas.width);
-    pushIfBackground(y * canvas.width + canvas.width - 1);
-  }
-  while (stack.length) {
-    const index = stack.pop();
-    if (index === undefined) continue;
-    backgroundMask[index] = 1;
-    const x = index % canvas.width;
-    const y = Math.floor(index / canvas.width);
-    if (x > 0) pushIfBackground(index - 1);
-    if (x < canvas.width - 1) pushIfBackground(index + 1);
-    if (y > 0) pushIfBackground(index - canvas.width);
-    if (y < canvas.height - 1) pushIfBackground(index + canvas.width);
-  }
-  for (let index = 0; index < backgroundMask.length; index += 1) {
-    if (!backgroundMask[index]) continue;
-    pixels.data[index * 4] = replacement[0];
-    pixels.data[index * 4 + 1] = replacement[1];
-    pixels.data[index * 4 + 2] = replacement[2];
-    pixels.data[index * 4 + 3] = 255;
-  }
-  context.putImageData(pixels, 0, 0);
+  return target;
+}
+
+export async function composeIdPhotoAsset(asset: ImageAsset, background: string) {
+  const canvas = await drawAsset(asset, { background });
   const blob = await canvasToBlob(canvas, 'image/jpeg', 0.94);
   return createAssetFromBlob(blob, addSuffix(asset.name, '证件照'));
 }

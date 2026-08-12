@@ -210,7 +210,7 @@ export function DirectCropPanel({ asset, onApply }: { asset: ImageAsset; onApply
   </>;
 }
 
-export function IdPhotoPanel({ asset, onApply }: { asset: ImageAsset; onApply: (values: CropRect, background: string) => Promise<void> }) {
+export function IdPhotoPanel({ asset, onApply }: { asset: ImageAsset; onApply: (values: CropRect, background: string, mattingMode: 'local' | 'ai') => Promise<void> }) {
   const sizes: IdPhotoSize[] = [
     { label: '一寸 · 25 × 35 mm', ratio: 25 / 35 },
     { label: '二寸 · 35 × 49 mm', ratio: 35 / 49 },
@@ -220,6 +220,7 @@ export function IdPhotoPanel({ asset, onApply }: { asset: ImageAsset; onApply: (
   ];
   const [sizeLabel, setSizeLabel] = useState(sizes[0].label);
   const [background, setBackground] = useState('#4389d6');
+  const [mattingMode, setMattingMode] = useState<'local' | 'ai'>('local');
   const [values, setValues] = useState<CropRect>(() => initialIdPhotoCrop(asset.width, asset.height, sizes[0].ratio));
   const frameRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ mode: 'move' | 'resize'; handle: CropHandle; start: { x: number; y: number }; initial: CropRect } | null>(null);
@@ -275,9 +276,10 @@ export function IdPhotoPanel({ asset, onApply }: { asset: ImageAsset; onApply: (
   return <>
     <div className="panel-intro"><h3>证件照</h3><p>先预览并调整取景位置，再将人物背景替换为纯色。</p></div>
     <div className="control-section"><label className="field"><span>照片规格</span><div className="field-control"><select className="select-input" value={sizeLabel} onChange={(event) => chooseSize(event.target.value)}>{sizes.map((item) => <option key={item.label}>{item.label}</option>)}</select></div></label><div className="color-field"><span>背景颜色</span><label><input type="color" value={background} onChange={(event) => setBackground(event.target.value)} /><b>{background.toUpperCase()}</b></label></div></div>
+    <div className="control-section"><div className="section-label">抠图方式</div><div className="segmented-grid two"><button className={mattingMode === 'local' ? 'is-selected' : ''} onClick={() => setMattingMode('local')}>本地抠图</button><button className={mattingMode === 'ai' ? 'is-selected' : ''} onClick={() => setMattingMode('ai')}>AI 抠图</button></div><div className="direct-tool-caption"><span>{mattingMode === 'local' ? '复用抠图模块' : '复用 AI / MODNet 模块'}</span><span>生成时处理</span></div></div>
     <div className="control-section direct-tool-section"><div className="section-label">裁剪前预览 <span className="muted">拖动框调整位置</span></div><div className="direct-image-frame crop-interaction id-photo-crop-frame" ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerMove={moveCrop} onPointerUp={endDrag} onPointerCancel={endDrag}><img src={asset.url} alt="证件照裁剪前预览" /><div className="crop-box id-photo-crop-box" style={{ left: `${(values.x / asset.width) * 100}%`, top: `${(values.y / asset.height) * 100}%`, width: `${(values.width / asset.width) * 100}%`, height: `${(values.height / asset.height) * 100}%` }} onPointerDown={(event) => startDrag(event, 'move')}><span className="crop-grid-line crop-grid-line-v one" /><span className="crop-grid-line crop-grid-line-v two" /><span className="crop-grid-line crop-grid-line-h one" /><span className="crop-grid-line crop-grid-line-h two" />{handles.map((handle) => <button type="button" aria-label={`调整证件照裁剪框 ${handle}`} className={`crop-handle ${handle}`} key={handle} onPointerDown={(event) => startDrag(event, 'resize', handle)} />)}</div></div><div className="direct-tool-caption"><span>{Math.round(values.width)} × {Math.round(values.height)} px</span><span>拖动角点调整比例</span></div></div>
     <div className="id-photo-result-section"><div className="section-label">裁剪后预览</div><div className="id-photo-result" style={{ aspectRatio: `${selectedSize.ratio}` }}><img src={asset.url} alt="证件照裁剪后预览" style={previewStyle} /><span style={{ backgroundColor: background }}>背景预览</span></div></div>
-    <button className="apply-button" onClick={() => void onApply(values, background)}>生成证件照</button>
+    <button className="apply-button" onClick={() => void onApply(values, background, mattingMode)}>生成证件照</button>
   </>;
 }
 

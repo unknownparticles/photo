@@ -55,10 +55,11 @@ import {
   createAssetFromBlob,
   createCollage,
   cropAsset,
-  createIdPhotoAsset,
+  composeIdPhotoAsset,
   downloadBlob,
   encodeAsset,
   encodeGifFrames,
+  estimateCornerColor,
   exportImage,
   readImageMetadata,
   removeBackgroundAsset,
@@ -508,9 +509,18 @@ function App() {
     await replaceActive(await cropAsset(activeAsset, values.x, values.y, values.width, values.height), '裁剪', `${values.width} × ${values.height}`);
   }
 
-  async function applyIdPhoto(values: { x: number; y: number; width: number; height: number }, background: string) {
+  async function applyIdPhoto(values: { x: number; y: number; width: number; height: number }, background: string, mattingMode: 'local' | 'ai') {
     if (!activeAsset) return;
-    await replaceActive(await createIdPhotoAsset(activeAsset, values, background), '生成证件照', `${Math.round(values.width)} × ${Math.round(values.height)} · ${background.toUpperCase()}`);
+    try {
+      const cropped = await cropAsset(activeAsset, values.x, values.y, values.width, values.height, '证件照裁剪');
+      const subject = mattingMode === 'ai'
+        ? await aiAdapter.run(cropped, { modelId: 'modnet' })
+        : await removeBackgroundAsset(cropped, { method: 'connected', targetColor: await estimateCornerColor(cropped), seedX: 0, seedY: 0, tolerance: 28, feather: 3 });
+      const next = await composeIdPhotoAsset(subject, background);
+      await replaceActive(next, '生成证件照', `${Math.round(values.width)} × ${Math.round(values.height)} · ${mattingMode === 'ai' ? 'AI 抠图' : '本地抠图'} · ${background.toUpperCase()}`);
+    } catch (error) {
+      setNotice({ type: 'warning', text: error instanceof Error ? error.message : '证件照抠图失败，请检查抠图模块配置' });
+    }
   }
 
   async function applyEdit(values: { brightness: number; contrast: number; saturation: number; blur: number }) {
@@ -866,7 +876,7 @@ function Workspace({
   onExportAll: () => void;
   onResize: (width: number, height: number) => Promise<void>;
   onCrop: (values: { x: number; y: number; width: number; height: number }) => Promise<void>;
-  onIdPhoto: (values: { x: number; y: number; width: number; height: number }, background: string) => Promise<void>;
+  onIdPhoto: (values: { x: number; y: number; width: number; height: number }, background: string, mattingMode: 'local' | 'ai') => Promise<void>;
   onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
@@ -907,7 +917,7 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhoto, onSplit, 
   assets: ImageAsset[];
   onResize: (width: number, height: number) => Promise<void>;
   onCrop: (values: { x: number; y: number; width: number; height: number }) => Promise<void>;
-  onIdPhoto: (values: { x: number; y: number; width: number; height: number }, background: string) => Promise<void>;
+  onIdPhoto: (values: { x: number; y: number; width: number; height: number }, background: string, mattingMode: 'local' | 'ai') => Promise<void>;
   onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
