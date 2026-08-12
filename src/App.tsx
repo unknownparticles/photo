@@ -55,6 +55,7 @@ import {
   createAssetFromBlob,
   createCollage,
   cropAsset,
+  createIdPhotoAsset,
   downloadBlob,
   encodeAsset,
   encodeGifFrames,
@@ -68,7 +69,7 @@ import {
 } from './core/image';
 import { useAppStore } from './store';
 import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, ExportFormat, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
-import { DirectCropPanel, DirectSplitPanel } from './components/DirectImageControls';
+import { DirectCropPanel, DirectSplitPanel, IdPhotoPanel } from './components/DirectImageControls';
 
 type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
 
@@ -341,6 +342,11 @@ function App() {
     await replaceActive(await cropAsset(activeAsset, values.x, values.y, values.width, values.height), '裁剪', `${values.width} × ${values.height}`);
   }
 
+  async function applyIdPhoto(values: { x: number; y: number; width: number; height: number }, background: string) {
+    if (!activeAsset) return;
+    await replaceActive(await createIdPhotoAsset(activeAsset, values, background), '生成证件照', `${Math.round(values.width)} × ${Math.round(values.height)} · ${background.toUpperCase()}`);
+  }
+
   async function applyEdit(values: { brightness: number; contrast: number; saturation: number; blur: number }) {
     if (!activeAsset) return;
     await replaceActive(await applyAdjustments(activeAsset, values), '图片编辑', '色彩调整');
@@ -552,6 +558,7 @@ function App() {
           onExportAll={() => void exportAll()}
           onResize={applyResize}
           onCrop={applyCrop}
+          onIdPhoto={applyIdPhoto}
           onSplit={applySplit}
           onMerge={applyMerge}
           onEncode={applyEncoding}
@@ -660,6 +667,7 @@ function Workspace({
   onExportAll,
   onResize,
   onCrop,
+  onIdPhoto,
   onSplit,
   onMerge,
   onEncode,
@@ -689,6 +697,7 @@ function Workspace({
   onExportAll: () => void;
   onResize: (width: number, height: number) => Promise<void>;
   onCrop: (values: { x: number; y: number; width: number; height: number }) => Promise<void>;
+  onIdPhoto: (values: { x: number; y: number; width: number; height: number }, background: string) => Promise<void>;
   onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
@@ -716,18 +725,19 @@ function Workspace({
       <div className="workspace-layout">
         <aside className="tool-sidebar"><div className="sidebar-title"><PanelLeft size={15} /><span>工具</span></div><div className="sidebar-list">{tools.map((tool) => { const ToolIcon = tool.icon; return <button className={`sidebar-tool ${activeTool === tool.id ? 'is-active' : ''}`} key={tool.id} onClick={() => onSelectTool(tool.id)} title={tool.description}><ToolIcon size={17} /><span>{tool.label}</span>{activeTool === tool.id && <span className="active-bar" />}</button>; })}</div><div className="sidebar-bottom"><ShieldCheck size={16} /><small>本地模式<br />Local only</small></div></aside>
         <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 实时预览</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <img className="main-preview" src={activeAsset.url} alt={activeAsset.name} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeAsset && <button className="icon-button" title="删除当前图片" aria-label="删除当前图片" onClick={() => onDeleteAsset(activeAsset.id)}><Trash2 size={16} /></button>}</div></div></section>
-        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onAiApply={onAiApply} onAiBrushApply={onAiBrushApply} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
+        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onAiApply={onAiApply} onAiBrushApply={onAiBrushApply} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
       </div>
     </main>
   );
 }
 
-function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, onEncode, onEdit, onAiApply, onAiBrushApply, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, setNotice }: {
+function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhoto, onSplit, onMerge, onEncode, onEdit, onAiApply, onAiBrushApply, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, setNotice }: {
   tool: ToolId;
   asset: ImageAsset | null;
   assets: ImageAsset[];
   onResize: (width: number, height: number) => Promise<void>;
   onCrop: (values: { x: number; y: number; width: number; height: number }) => Promise<void>;
+  onIdPhoto: (values: { x: number; y: number; width: number; height: number }, background: string) => Promise<void>;
   onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
@@ -755,7 +765,7 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onSplit, onMerge, on
     case 'batch': return <BatchPanel count={assets.length} onApply={onBatch} />;
     case 'gif': return <GifPanel count={assets.length} onApply={onExportGif} />;
     case 'ai': return <AiPanel asset={asset} onApply={onAiApply} onBrushApply={onAiBrushApply} setNotice={setNotice} />;
-    case 'id-photo': return <IdPhotoPanel asset={asset} onApply={onCrop} />;
+    case 'id-photo': return <IdPhotoPanel asset={asset} onApply={onIdPhoto} />;
     default: return <EmptyPanel />;
   }
 }
@@ -1061,8 +1071,6 @@ function AiPanel({ asset, onApply, onBrushApply, setNotice }: { asset: ImageAsse
     <div className="ai-footnote"><Info size={14} /><span>模型路径可通过 <code>VITE_MODEL_BASE_URL</code> 配置。当前文件：{asset.name}</span></div>
   </>;
 }
-
-function IdPhotoPanel({ asset, onApply }: { asset: ImageAsset; onApply: (values: { x: number; y: number; width: number; height: number }) => Promise<void> }) { const [size, setSize] = useState('一寸 · 25 × 35 mm'); const [background, setBackground] = useState('#4389d6'); return <><PanelIntro title="证件照" description="快速裁剪出常用证件照比例，背景色可在导出前调整。" /><div className="control-section"><Field label="照片规格"><select className="select-input" value={size} onChange={(event) => setSize(event.target.value)}><option>一寸 · 25 × 35 mm</option><option>二寸 · 35 × 49 mm</option><option>小一寸 · 22 × 32 mm</option><option>护照 · 35 × 45 mm</option><option>身份证 · 26 × 32 mm</option></select></Field><div className="color-field"><span>背景颜色</span><label><input type="color" value={background} onChange={(event) => setBackground(event.target.value)} /><b>{background.toUpperCase()}</b></label></div></div><div className="id-photo-preview"><img src={asset.url} alt="证件照预览" /><span>证件照比例</span></div><ApplyButton onClick={() => void onApply({ x: 0, y: 0, width: asset.width, height: Math.round(asset.width * 1.4) })} label="生成证件照" /></>; }
 
 function EmptyPanel() { return <div className="empty-panel"><ImagePlus size={29} /><strong>先添加一张图片</strong><span>选择图片后，这里会显示当前工具的参数。</span></div>; }
 
