@@ -1,13 +1,17 @@
 import type { AiAdapter, AiCapability, AiModelId, AiOperationOptions, AiTask, ImageAsset, ProcessedAsset } from '../types';
 import { canvasToBlob, createAssetFromBlob, loadImage } from './image';
 
-const modelBaseUrl = import.meta.env.VITE_MODEL_BASE_URL ?? '/photo/models';
+const modelBaseUrl = import.meta.env.VITE_MODEL_BASE_URL?.trim() || new URL('models/', document.baseURI).toString();
 const MAX_MODEL_INPUT_EDGE = 1024;
 const MAX_MODEL_OUTPUT_EDGE = 8192;
 
 type OnnxRuntime = typeof import('onnxruntime-web');
 type InferenceSession = Awaited<ReturnType<OnnxRuntime['InferenceSession']['create']>>;
 type TensorOutput = { data: Float32Array | Uint8Array | Int32Array; dims: readonly number[] };
+
+function modelUrl(modelId: AiModelId) {
+  return new URL(`${modelId}.onnx`, modelBaseUrl.endsWith('/') ? modelBaseUrl : `${modelBaseUrl}/`).toString();
+}
 
 function taskForModel(modelId: AiModelId): AiTask {
   return modelId === 'modnet' ? 'remove-background' : 'upscale';
@@ -126,12 +130,22 @@ export class LocalAiAdapter implements AiAdapter {
     const runtime = await import('onnxruntime-web');
     this.ort = runtime;
     runtime.env.wasm.wasmPaths = `${modelBaseUrl}/wasm/`;
-    const response = await fetch(`${modelBaseUrl}/${modelId}.onnx`, { method: 'HEAD' });
+    const url = modelUrl(modelId);
+    let response: Response;
+    try {
+      response = await fetch(url, { cache: 'force-cache' });
+    } catch {
+      throw new Error(`模型无法访问：${url}。请检查模型目录、网络或 VITE_MODEL_BASE_URL 配置`);
+    }
     const contentType = response.headers.get('content-type') ?? '';
-    if (!response.ok || contentType.includes('text/html')) throw new Error(`模型文件未配置：${modelId}.onnx`);
+    if (response.status === 404 || contentType.includes('text/html')) {
+      throw new Error(`缺少模型文件：${modelId}.onnx。请将它放入 public/models/，或配置 VITE_MODEL_BASE_URL`);
+    }
+    if (!response.ok) throw new Error(`模型加载失败：HTTP ${response.status} · ${modelId}.onnx`);
+    const modelData = await response.arrayBuffer();
     onProgress?.(0.3);
     const executionProviders = capability.runtime === 'webgpu' ? ['webgpu', 'wasm'] : ['wasm'];
-    const next = await runtime.InferenceSession.create(`${modelBaseUrl}/${modelId}.onnx`, { executionProviders, graphOptimizationLevel: 'all' });
+    const next = await runtime.InferenceSession.create(modelData, { executionProviders, graphOptimizationLevel: 'all' });
     this.sessions.set(modelId, next);
     onProgress?.(1);
     return next;

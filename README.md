@@ -11,7 +11,7 @@ npm run dev
 
 ## 本地 AI 模型
 
-AI 适配器默认从 `/photo/models` 按需加载 ONNX 模型。可通过 `VITE_MODEL_BASE_URL` 指定静态模型目录；模型缺失时，界面会显示能力提示，不会伪造处理结果。
+AI 适配器默认从当前站点的 `models/` 目录按需加载 ONNX 模型。请将 `modnet.onnx`、`espcn-2x.onnx` 和 `espcn-4x.onnx` 放入 `public/models/`，构建后会发布到 `/photo/models/`。也可通过 `VITE_MODEL_BASE_URL` 指定其他静态模型目录。模型缺失时，界面会显示明确的文件提示，不会伪造处理结果。
 
 ## 发布
 
