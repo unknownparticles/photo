@@ -96,12 +96,13 @@ function outputCanvas(output: TensorOutput, task: AiTask) {
       pixels.data[index + 3] = Math.round(alpha);
     }
   } else {
-    if (shape.channels < 3) throw new Error('AI 模型没有可用的 RGB 输出');
+    if (shape.channels < 1) throw new Error('AI 模型没有可用的图像输出');
     for (let y = 0; y < shape.height; y += 1) for (let x = 0; x < shape.width; x += 1) {
       const index = (y * shape.width + x) * 4;
-      pixels.data[index] = Math.round(outputValue(valueAt(output, shape, x, y, 0), range.min, range.max));
-      pixels.data[index + 1] = Math.round(outputValue(valueAt(output, shape, x, y, 1), range.min, range.max));
-      pixels.data[index + 2] = Math.round(outputValue(valueAt(output, shape, x, y, 2), range.min, range.max));
+      const red = Math.round(outputValue(valueAt(output, shape, x, y, 0), range.min, range.max));
+      pixels.data[index] = red;
+      pixels.data[index + 1] = shape.channels > 1 ? Math.round(outputValue(valueAt(output, shape, x, y, 1), range.min, range.max)) : red;
+      pixels.data[index + 2] = shape.channels > 2 ? Math.round(outputValue(valueAt(output, shape, x, y, 2), range.min, range.max)) : red;
       pixels.data[index + 3] = shape.channels > 3 ? Math.round(outputValue(valueAt(output, shape, x, y, 3), range.min, range.max)) : 255;
     }
   }
