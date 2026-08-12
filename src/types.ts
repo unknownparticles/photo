@@ -108,8 +108,8 @@ export interface AiCapability {
   runtime: 'webgpu' | 'wasm' | 'unavailable';
 }
 
-export type AiTask = 'remove-background' | 'upscale' | 'enhance' | 'denoise';
-export type AiModelId = 'upscale-2x' | 'upscale-4x' | 'remove-background' | 'enhance' | 'denoise';
+export type AiTask = 'remove-background' | 'upscale';
+export type AiModelId = 'modnet' | 'espcn-2x' | 'espcn-4x';
 
 export type AiOperationOptions = {
   modelId: AiModelId;
@@ -118,7 +118,7 @@ export type AiOperationOptions = {
 
 export type AiRequest =
   | { mode: 'model'; task: AiTask; scale?: 2 | 4 }
-  | { mode: 'local-fallback'; task: Exclude<AiTask, 'remove-background'>; scale?: 2 | 4 };
+  | { mode: 'local-fallback'; task: 'upscale'; scale?: 2 | 4 };
 
 export interface LocalProcessor {
   process(asset: ImageAsset, operation: ImageOperation, signal?: AbortSignal): Promise<ProcessedAsset>;
