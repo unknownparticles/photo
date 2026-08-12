@@ -516,7 +516,7 @@ function App() {
   }
 
   async function previewIdPhoto(values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', targetColor: [number, number, number] | null, tolerance: number, feather: number) {
-    if (!activeAsset) return;
+    if (!activeAsset) return null;
     try {
       const cropped = await cropAsset(activeAsset, values.x, values.y, values.width, values.height, '证件照裁剪');
       const dominantColor = targetColor ?? await estimateDominantColor(cropped);
