@@ -66,6 +66,36 @@ export function canvasToBlob(canvas: HTMLCanvasElement, type: ExportFormat = 'im
   });
 }
 
+export async function normalizeImageOrientation(blob: Blob): Promise<Blob> {
+  let rotation;
+  try {
+    const exifr = await import('exifr');
+    rotation = await exifr.rotation(blob);
+  } catch {
+    return blob;
+  }
+  if (!rotation || (rotation.deg === 0 && rotation.scaleX === 1 && rotation.scaleY === 1)) return blob;
+
+  const image = await loadImage(blob);
+  const canvas = document.createElement('canvas');
+  canvas.width = rotation.dimensionSwapped ? image.naturalHeight : image.naturalWidth;
+  canvas.height = rotation.dimensionSwapped ? image.naturalWidth : image.naturalHeight;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('当前浏览器无法创建图片方向校正画布');
+
+  if (rotation.canvas) {
+    context.translate(canvas.width / 2, canvas.height / 2);
+    context.rotate(rotation.rad);
+    context.scale(rotation.scaleX, rotation.scaleY);
+    context.drawImage(image, -image.naturalWidth / 2, -image.naturalHeight / 2);
+  } else {
+    context.drawImage(image, 0, 0);
+  }
+
+  const type = blob.type === 'image/jpeg' ? 'image/jpeg' : blob.type === 'image/webp' ? 'image/webp' : 'image/png';
+  return canvasToBlob(canvas, type, type === 'image/jpeg' ? 0.94 : undefined);
+}
+
 export async function encodeAsset(asset: ProcessedAsset, options: ExportOptions): Promise<Blob> {
   const needsBackground = options.format === 'image/jpeg' && !options.preserveTransparency;
   const canvas = await drawAsset(asset, { background: needsBackground ? options.background : undefined });

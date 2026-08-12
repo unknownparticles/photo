@@ -61,6 +61,7 @@ import {
   encodeGifFrames,
   estimateDominantColor,
   exportImage,
+  normalizeImageOrientation,
   readImageMetadata,
   removeBackgroundAsset,
   applyLocalAiFallback,
@@ -362,7 +363,8 @@ function workspaceMetrics(viewport: ViewportSize) {
 
 async function fileToAsset(file: File) {
   if (!file.type.startsWith('image/')) return null;
-  const [asset, metadata] = await Promise.all([createAssetFromBlob(file, file.name, file), readImageMetadata(file)]);
+  const [normalizedBlob, metadata] = await Promise.all([normalizeImageOrientation(file), readImageMetadata(file)]);
+  const asset = await createAssetFromBlob(normalizedBlob, file.name, file);
   return metadata ? { ...asset, metadata } : asset;
 }
 
