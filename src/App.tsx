@@ -59,7 +59,7 @@ import {
   downloadBlob,
   encodeAsset,
   encodeGifFrames,
-  estimateCornerColor,
+  estimateDominantColor,
   exportImage,
   readImageMetadata,
   removeBackgroundAsset,
@@ -69,7 +69,7 @@ import {
   updateImageMetadata,
 } from './core/image';
 import { useAppStore } from './store';
-import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, ExportFormat, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
+import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, ExportFormat, IdPhotoMattingPreview, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
 import { DirectCropPanel, DirectSplitPanel, IdPhotoPanel } from './components/DirectImageControls';
 
 type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
@@ -515,18 +515,29 @@ function App() {
     await replaceActive(await cropAsset(activeAsset, values.x, values.y, values.width, values.height), '裁剪', `${values.width} × ${values.height}`);
   }
 
-  async function applyIdPhoto(values: { x: number; y: number; width: number; height: number }, background: string, mattingMode: 'local' | 'ai') {
+  async function previewIdPhoto(values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', targetColor: [number, number, number] | null, tolerance: number, feather: number) {
     if (!activeAsset) return;
     try {
       const cropped = await cropAsset(activeAsset, values.x, values.y, values.width, values.height, '证件照裁剪');
+      const dominantColor = targetColor ?? await estimateDominantColor(cropped);
       const subject = mattingMode === 'ai'
         ? await aiAdapter.run(cropped, { modelId: 'modnet' })
-        : await removeBackgroundAsset(cropped, { method: 'connected', targetColor: await estimateCornerColor(cropped), seedX: 0, seedY: 0, tolerance: 28, feather: 3 });
-      const next = await composeIdPhotoAsset(subject, background);
-      await replaceActive(next, '生成证件照', `${Math.round(values.width)} × ${Math.round(values.height)} · ${mattingMode === 'ai' ? 'AI 抠图' : '本地抠图'} · ${background.toUpperCase()}`);
+        : await removeBackgroundAsset(cropped, { method, targetColor: dominantColor, seedX: 0, seedY: 0, tolerance, feather });
+      return { subject, source: cropped, targetColor: dominantColor } satisfies IdPhotoMattingPreview;
     } catch (error) {
       setNotice({ type: 'warning', text: error instanceof Error ? error.message : '证件照抠图失败，请检查抠图模块配置' });
+      return null;
     }
+  }
+
+  async function brushIdPhoto(preview: IdPhotoMattingPreview, stroke: BackgroundBrushStroke) {
+    const subject = await applyBackgroundBrush(preview.subject, preview.source, stroke);
+    return { ...preview, subject };
+  }
+
+  async function applyIdPhoto(preview: IdPhotoMattingPreview, background: string, values: { width: number; height: number }, mattingMode: 'local' | 'ai') {
+    const next = await composeIdPhotoAsset(preview.subject, background);
+    await replaceActive(next, '生成证件照', `${Math.round(values.width)} × ${Math.round(values.height)} · ${mattingMode === 'ai' ? 'AI 抠图' : '本地抠图'} · ${background.toUpperCase()}`);
   }
 
   async function applyEdit(values: { brightness: number; contrast: number; saturation: number; blur: number }) {
@@ -741,6 +752,8 @@ function App() {
           onExportAll={() => void exportAll()}
           onResize={applyResize}
           onCrop={applyCrop}
+          onIdPhotoPreview={previewIdPhoto}
+          onIdPhotoBrush={brushIdPhoto}
           onIdPhoto={applyIdPhoto}
           onSplit={applySplit}
           onMerge={applyMerge}
@@ -851,6 +864,8 @@ function Workspace({
   onExportAll,
   onResize,
   onCrop,
+  onIdPhotoPreview,
+  onIdPhotoBrush,
   onIdPhoto,
   onSplit,
   onMerge,
@@ -882,7 +897,9 @@ function Workspace({
   onExportAll: () => void;
   onResize: (width: number, height: number) => Promise<void>;
   onCrop: (values: { x: number; y: number; width: number; height: number }) => Promise<void>;
-  onIdPhoto: (values: { x: number; y: number; width: number; height: number }, background: string, mattingMode: 'local' | 'ai') => Promise<void>;
+  onIdPhotoPreview: (values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>;
+  onIdPhotoBrush: (preview: IdPhotoMattingPreview, stroke: BackgroundBrushStroke) => Promise<IdPhotoMattingPreview>;
+  onIdPhoto: (preview: IdPhotoMattingPreview, background: string, values: { width: number; height: number }, mattingMode: 'local' | 'ai') => Promise<void>;
   onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
@@ -911,19 +928,21 @@ function Workspace({
       <div className="workspace-layout">
         <aside className="tool-sidebar"><div className="sidebar-title"><PanelLeft size={15} /><span>工具</span></div><div className="sidebar-list">{tools.map((tool) => { const ToolIcon = tool.icon; return <button className={`sidebar-tool ${activeTool === tool.id ? 'is-active' : ''}`} key={tool.id} onClick={() => onSelectTool(tool.id)} title={tool.description}><ToolIcon size={17} /><span>{tool.label}</span>{activeTool === tool.id && <span className="active-bar" />}</button>; })}</div><div className="sidebar-bottom"><ShieldCheck size={16} /><small>本地模式<br />Local only</small></div></aside>
         <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 实时预览</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <PreviewImage asset={activeAsset} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeAsset && <button className="icon-button" title="删除当前图片" aria-label="删除当前图片" onClick={() => onDeleteAsset(activeAsset.id)}><Trash2 size={16} /></button>}</div></div></section>
-        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
+        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onIdPhotoPreview={onIdPhotoPreview} onIdPhotoBrush={onIdPhotoBrush} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
       </div>
     </main>
   );
 }
 
-function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhoto, onSplit, onMerge, onEncode, onEdit, onMattingApply, onMattingBrushApply, onAiApply, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, setNotice }: {
+function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, onIdPhotoBrush, onIdPhoto, onSplit, onMerge, onEncode, onEdit, onMattingApply, onMattingBrushApply, onAiApply, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, setNotice }: {
   tool: ToolId;
   asset: ImageAsset | null;
   assets: ImageAsset[];
   onResize: (width: number, height: number) => Promise<void>;
   onCrop: (values: { x: number; y: number; width: number; height: number }) => Promise<void>;
-  onIdPhoto: (values: { x: number; y: number; width: number; height: number }, background: string, mattingMode: 'local' | 'ai') => Promise<void>;
+  onIdPhotoPreview: (values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>;
+  onIdPhotoBrush: (preview: IdPhotoMattingPreview, stroke: BackgroundBrushStroke) => Promise<IdPhotoMattingPreview>;
+  onIdPhoto: (preview: IdPhotoMattingPreview, background: string, values: { width: number; height: number }, mattingMode: 'local' | 'ai') => Promise<void>;
   onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
@@ -953,7 +972,7 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhoto, onSplit, 
     case 'batch': return <BatchPanel count={assets.length} onApply={onBatch} />;
     case 'gif': return <GifPanel count={assets.length} onApply={onExportGif} />;
     case 'ai': return <AiPanel asset={asset} onApply={onAiApply} setNotice={setNotice} />;
-    case 'id-photo': return <IdPhotoPanel asset={asset} onApply={onIdPhoto} />;
+    case 'id-photo': return <IdPhotoPanel asset={asset} onPreview={onIdPhotoPreview} onBrushApply={onIdPhotoBrush} onApply={onIdPhoto} />;
     default: return <EmptyPanel />;
   }
 }

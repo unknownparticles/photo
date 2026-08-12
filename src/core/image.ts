@@ -95,7 +95,7 @@ export async function cropAsset(asset: ImageAsset, x: number, y: number, width: 
   return createAssetFromBlob(blob, addSuffix(asset.name, label));
 }
 
-export async function estimateCornerColor(asset: ImageAsset): Promise<[number, number, number]> {
+export async function estimateDominantColor(asset: ImageAsset): Promise<[number, number, number]> {
   const image = await loadImage(asset.blob);
   const size = canvasSize(image.naturalWidth, image.naturalHeight);
   const canvas = document.createElement('canvas');
@@ -104,18 +104,25 @@ export async function estimateCornerColor(asset: ImageAsset): Promise<[number, n
   const context = canvas.getContext('2d');
   if (!context) throw new Error('当前浏览器无法创建画布');
   context.drawImage(image, 0, 0, canvas.width, canvas.height);
-  const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-  const corners = [0, canvas.width - 1, (canvas.height - 1) * canvas.width, canvas.width * canvas.height - 1];
-  const target: [number, number, number] = [0, 0, 0];
-  corners.forEach((index) => {
-    target[0] += pixels.data[index * 4];
-    target[1] += pixels.data[index * 4 + 1];
-    target[2] += pixels.data[index * 4 + 2];
-  });
-  target[0] = Math.round(target[0] / corners.length);
-  target[1] = Math.round(target[1] / corners.length);
-  target[2] = Math.round(target[2] / corners.length);
-  return target;
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  const bins = new Map<number, { count: number; red: number; green: number; blue: number }>();
+  const step = Math.max(1, Math.floor(Math.sqrt((canvas.width * canvas.height) / 120000)));
+  for (let y = 0; y < canvas.height; y += step) for (let x = 0; x < canvas.width; x += step) {
+    const index = (y * canvas.width + x) * 4;
+    if (pixels[index + 3] < 24) continue;
+    const red = pixels[index];
+    const green = pixels[index + 1];
+    const blue = pixels[index + 2];
+    const key = (red >> 4) * 256 + (green >> 4) * 16 + (blue >> 4);
+    const bin = bins.get(key) ?? { count: 0, red: 0, green: 0, blue: 0 };
+    bin.count += 1;
+    bin.red += red;
+    bin.green += green;
+    bin.blue += blue;
+    bins.set(key, bin);
+  }
+  const dominant = [...bins.values()].sort((left, right) => right.count - left.count)[0];
+  return dominant ? [Math.round(dominant.red / dominant.count), Math.round(dominant.green / dominant.count), Math.round(dominant.blue / dominant.count)] : [255, 255, 255];
 }
 
 export async function composeIdPhotoAsset(asset: ImageAsset, background: string) {

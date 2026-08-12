@@ -71,6 +71,12 @@ export interface LocalBackgroundRemovalOptions {
   feather: number;
 }
 
+export interface IdPhotoMattingPreview {
+  subject: ImageAsset;
+  source: ImageAsset;
+  targetColor: [number, number, number];
+}
+
 export type BackgroundBrushMode = 'erase' | 'restore';
 
 export interface BackgroundBrushPoint {
