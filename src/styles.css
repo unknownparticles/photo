@@ -212,6 +212,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .app-shell.theme-dark .ai-progress-track { background: #343d35; }
 .app-shell.theme-dark .download-result-button { color: #bdd59d; background: #202a20; border-color: #485a42; }
 .background-pick-frame { cursor: crosshair; touch-action: none; user-select: none; } .background-pick-frame > img { display: block; width: 100%; height: 100%; object-fit: contain; pointer-events: none; } .background-pick-marker { position: absolute; z-index: 2; width: 18px; height: 18px; border: 2px solid #fff; border-radius: 50%; box-shadow: 0 0 0 2px #e78f49, 0 1px 5px rgba(0,0,0,.4); transform: translate(-50%, -50%); pointer-events: none; } .ai-actions button:disabled { opacity: .55; cursor: progress; }
+.id-photo-interaction-tabs button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
+.id-photo-crop-frame.is-sampling { cursor: crosshair; }
+.id-photo-crop-frame.is-sampling .id-photo-crop-box { pointer-events: none; }
+.id-photo-pick-marker { z-index: 4; display: grid; place-items: center; color: #fff; font: 700 8px 'DM Mono', monospace; text-shadow: 0 1px 2px rgba(0,0,0,.8); }
+.id-photo-clear-samples { display: inline-flex; align-items: center; gap: 5px; margin-top: 9px; padding: 6px 8px; border: 1px solid #e0e7df; border-radius: 6px; color: #7d8a80; background: #fbfcfa; font-size: 9px; }
+.app-shell.theme-dark .id-photo-clear-samples { color: #b0bab1; background: #202522; border-color: #3a433d; }
 .brush-control-section { display: flex; flex-direction: column; gap: 11px; }
 .brush-control-section .segmented-grid button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
 .brush-interaction { cursor: crosshair; }

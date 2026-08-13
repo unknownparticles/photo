@@ -71,7 +71,7 @@ import {
   updateImageMetadata,
 } from './core/image';
 import { useAppStore } from './store';
-import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, CleanupBrushStroke, ExportFormat, IdPhotoMattingPreview, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
+import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, BackgroundColorSample, CleanupBrushStroke, ExportFormat, IdPhotoMattingPreview, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
 import { DirectCropPanel, DirectSplitPanel, IdPhotoPanel } from './components/DirectImageControls';
 
 type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
@@ -519,15 +519,17 @@ function App() {
     await replaceActive(await cropAsset(activeAsset, values.x, values.y, values.width, values.height), '裁剪', `${values.width} × ${values.height}`);
   }
 
-  async function previewIdPhoto(values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', targetColor: [number, number, number] | null, tolerance: number, feather: number) {
+  async function previewIdPhoto(values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', samples: BackgroundColorSample[], targetColor: [number, number, number] | null, tolerance: number, feather: number) {
     if (!activeAsset) return null;
     try {
       const cropped = await cropAsset(activeAsset, values.x, values.y, values.width, values.height, '证件照裁剪');
       const dominantColor = targetColor ?? await estimateDominantColor(cropped);
+      const targetColors = samples.length ? samples.map((sample) => sample.color) : [dominantColor];
+      const seeds = samples.map(({ x, y }) => ({ x, y }));
       const subject = mattingMode === 'ai'
         ? await aiAdapter.run(cropped, { modelId: 'modnet' })
-        : await removeBackgroundAsset(cropped, { method, targetColor: dominantColor, seedX: 0, seedY: 0, tolerance, feather });
-      return { subject, source: cropped, targetColor: dominantColor } satisfies IdPhotoMattingPreview;
+        : await removeBackgroundAsset(cropped, { method, targetColor: targetColors[0], targetColors, seedX: seeds[0]?.x ?? 0, seedY: seeds[0]?.y ?? 0, seeds, tolerance, feather });
+      return { subject, source: cropped, targetColor: targetColors[0], targetColors } satisfies IdPhotoMattingPreview;
     } catch (error) {
       setNotice({ type: 'warning', text: error instanceof Error ? error.message : '证件照抠图失败，请检查抠图模块配置' });
       return null;
@@ -913,7 +915,7 @@ function Workspace({
   onExportAll: () => void;
   onResize: (width: number, height: number) => Promise<void>;
   onCrop: (values: { x: number; y: number; width: number; height: number }) => Promise<void>;
-  onIdPhotoPreview: (values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>;
+  onIdPhotoPreview: (values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', samples: BackgroundColorSample[], targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>;
   onIdPhotoBrush: (preview: IdPhotoMattingPreview, stroke: BackgroundBrushStroke) => Promise<IdPhotoMattingPreview>;
   onIdPhoto: (preview: IdPhotoMattingPreview, background: string, values: { width: number; height: number }, mattingMode: 'local' | 'ai') => Promise<void>;
   onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;
@@ -957,7 +959,7 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, on
   assets: ImageAsset[];
   onResize: (width: number, height: number) => Promise<void>;
   onCrop: (values: { x: number; y: number; width: number; height: number }) => Promise<void>;
-  onIdPhotoPreview: (values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>;
+  onIdPhotoPreview: (values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', samples: BackgroundColorSample[], targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>;
   onIdPhotoBrush: (preview: IdPhotoMattingPreview, stroke: BackgroundBrushStroke) => Promise<IdPhotoMattingPreview>;
   onIdPhoto: (preview: IdPhotoMattingPreview, background: string, values: { width: number; height: number }, mattingMode: 'local' | 'ai') => Promise<void>;
   onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;

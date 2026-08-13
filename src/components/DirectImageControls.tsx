@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
-import { CheckCircle2, Columns3, Combine, Paintbrush, Plus, RotateCcw } from 'lucide-react';
-import type { BackgroundBrushMode, BackgroundBrushPoint, BackgroundBrushStroke, IdPhotoMattingPreview, ImageAsset, SplitLine } from '../types';
+import { CheckCircle2, Columns3, Combine, Paintbrush, Pipette, Plus, RotateCcw } from 'lucide-react';
+import type { BackgroundBrushMode, BackgroundBrushPoint, BackgroundBrushStroke, BackgroundColorSample, IdPhotoMattingPreview, ImageAsset, SplitLine } from '../types';
 
 type CropRect = { x: number; y: number; width: number; height: number };
 type CropHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
@@ -210,7 +210,7 @@ export function DirectCropPanel({ asset, onApply }: { asset: ImageAsset; onApply
   </>;
 }
 
-export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asset: ImageAsset; onPreview: (values: CropRect, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>; onBrushApply: (preview: IdPhotoMattingPreview, stroke: BackgroundBrushStroke) => Promise<IdPhotoMattingPreview>; onApply: (preview: IdPhotoMattingPreview, background: string, values: CropRect, mattingMode: 'local' | 'ai') => Promise<void> }) {
+export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asset: ImageAsset; onPreview: (values: CropRect, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', samples: BackgroundColorSample[], targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>; onBrushApply: (preview: IdPhotoMattingPreview, stroke: BackgroundBrushStroke) => Promise<IdPhotoMattingPreview>; onApply: (preview: IdPhotoMattingPreview, background: string, values: CropRect, mattingMode: 'local' | 'ai') => Promise<void> }) {
   const sizes: IdPhotoSize[] = [
     { label: '一寸 · 25 × 35 mm', ratio: 25 / 35 },
     { label: '二寸 · 35 × 49 mm', ratio: 35 / 49 },
@@ -223,6 +223,8 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asse
   const [mattingMode, setMattingMode] = useState<'local' | 'ai'>('local');
   const [method, setMethod] = useState<'solid' | 'connected'>('solid');
   const [targetColor, setTargetColor] = useState<[number, number, number] | null>(null);
+  const [interaction, setInteraction] = useState<'crop' | 'sample'>('crop');
+  const [samples, setSamples] = useState<BackgroundColorSample[]>([]);
   const [tolerance, setTolerance] = useState(28);
   const [feather, setFeather] = useState(3);
   const [preview, setPreview] = useState<IdPhotoMattingPreview | null>(null);
@@ -232,6 +234,7 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asse
   const [strokePoints, setStrokePoints] = useState<BackgroundBrushPoint[]>([]);
   const [values, setValues] = useState<CropRect>(() => initialIdPhotoCrop(asset.width, asset.height, sizes[0].ratio));
   const frameRef = useRef<HTMLDivElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
   const brushFrameRef = useRef<HTMLDivElement>(null);
   const brushRef = useRef(false);
   const brushPointsRef = useRef<BackgroundBrushPoint[]>([]);
@@ -243,6 +246,7 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asse
     setValues(initialIdPhotoCrop(asset.width, asset.height, selectedSize.ratio));
     setPreview(null);
     setTargetColor(null);
+    setSamples([]);
   }, [asset.id, asset.width, asset.height, selectedSize.ratio]);
 
   function chooseSize(label: string) {
@@ -250,6 +254,7 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asse
     setSizeLabel(label);
     setValues(initialIdPhotoCrop(asset.width, asset.height, next.ratio));
     setPreview(null);
+    setSamples([]);
   }
 
   function startDrag(event: ReactPointerEvent<HTMLElement>, mode: 'move' | 'resize', handle: CropHandle = 'se') {
@@ -258,6 +263,7 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asse
     event.preventDefault();
     event.stopPropagation();
     setPreview(null);
+    setSamples([]);
     frame.setPointerCapture(event.pointerId);
     const point = pointerInFrame(event, frame);
     dragRef.current = { mode, handle, start: point, initial: values };
@@ -292,10 +298,32 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asse
 
   async function generatePreview() {
     setBusy(true);
-    const next = await onPreview(values, mattingMode, method, targetColor, tolerance, feather);
+    const next = await onPreview(values, mattingMode, method, samples, targetColor, tolerance, feather);
     if (next) setTargetColor(next.targetColor);
     setPreview(next);
     setBusy(false);
+  }
+
+  function pickBackgroundColor(event: ReactPointerEvent<HTMLDivElement>) {
+    if (interaction !== 'sample' || mattingMode !== 'local') return;
+    const frame = frameRef.current;
+    const image = imageRef.current;
+    if (!frame || !image) return;
+    const point = pointerInFrame(event, frame);
+    const imageX = point.x / 100 * asset.width;
+    const imageY = point.y / 100 * asset.height;
+    if (imageX < values.x || imageX > values.x + values.width || imageY < values.y || imageY > values.y + values.height) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = 1;
+    canvas.height = 1;
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    context.drawImage(image, imageX, imageY, 1, 1, 0, 0, 1, 1);
+    const pixel = context.getImageData(0, 0, 1, 1).data;
+    const sample = { color: [pixel[0], pixel[1], pixel[2]] as [number, number, number], x: (imageX - values.x) / values.width * 100, y: (imageY - values.y) / values.height * 100 };
+    setSamples((current) => [...current, sample]);
+    setTargetColor(sample.color);
+    setPreview(null);
   }
 
   function brushPoint(event: ReactPointerEvent<HTMLDivElement>) {
@@ -348,9 +376,9 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asse
   return <>
     <div className="panel-intro"><h3>证件照</h3><p>先预览并调整取景位置，再将人物背景替换为纯色。</p></div>
     <div className="control-section"><label className="field"><span>照片规格</span><div className="field-control"><select className="select-input" value={sizeLabel} onChange={(event) => chooseSize(event.target.value)}>{sizes.map((item) => <option key={item.label}>{item.label}</option>)}</select></div></label><div className="color-field"><span>背景颜色</span><label><input type="color" value={background} onChange={(event) => setBackground(event.target.value)} /><b>{background.toUpperCase()}</b></label></div></div>
-    <div className="control-section"><div className="section-label">抠图方式</div><div className="segmented-grid two"><button className={mattingMode === 'local' ? 'is-selected' : ''} onClick={() => { setMattingMode('local'); setPreview(null); }}>本地抠图</button><button className={mattingMode === 'ai' ? 'is-selected' : ''} onClick={() => { setMattingMode('ai'); setPreview(null); }}>AI 抠图</button></div><div className="direct-tool-caption"><span>{mattingMode === 'local' ? '复用抠图模块' : '复用 AI / MODNet 模块'}</span><span>先预览再确认</span></div></div>
+    <div className="control-section"><div className="section-label">抠图方式</div><div className="segmented-grid two"><button className={mattingMode === 'local' ? 'is-selected' : ''} onClick={() => { setMattingMode('local'); setPreview(null); }}>本地抠图</button><button className={mattingMode === 'ai' ? 'is-selected' : ''} onClick={() => { setMattingMode('ai'); setInteraction('crop'); setPreview(null); }}>AI 抠图</button></div><div className="direct-tool-caption"><span>{mattingMode === 'local' ? '复用抠图模块' : '复用 AI / MODNet 模块'}</span><span>先预览再确认</span></div></div>
     {mattingMode === 'local' && <div className="control-section"><div className="segmented-grid two"><button className={method === 'connected' ? 'is-selected' : ''} onClick={() => { setMethod('connected'); setPreview(null); }}>联通色块</button><button className={method === 'solid' ? 'is-selected' : ''} onClick={() => { setMethod('solid'); setPreview(null); }}>全图颜色</button></div><div className="color-field"><span>默认目标颜色</span><label><input type="color" value={previewColor} onChange={(event) => { setTargetColor(hexToRgb(event.target.value)); setPreview(null); }} /><b>{previewColor.toUpperCase()}</b></label></div><div className="range-heading"><span>色彩匹配度</span><strong>{tolerance}%</strong></div><input className="range-input" type="range" min="1" max="100" value={tolerance} onChange={(event) => { setTolerance(Number(event.target.value)); setPreview(null); }} /><div className="range-heading"><span>羽化半径</span><strong>{feather} px</strong></div><input className="range-input" type="range" min="0" max="40" value={feather} onChange={(event) => { setFeather(Number(event.target.value)); setPreview(null); }} /><div className="direct-tool-caption"><span>首次预览自动选择占比最大的颜色</span><span>参数可调整</span></div></div>}
-    <div className="control-section direct-tool-section"><div className="section-label">裁剪前预览 <span className="muted">拖动框调整位置</span></div><div className="direct-image-frame crop-interaction id-photo-crop-frame" ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerMove={moveCrop} onPointerUp={endDrag} onPointerCancel={endDrag}><img src={asset.url} alt="证件照裁剪前预览" /><div className="crop-box id-photo-crop-box" style={{ left: `${(values.x / asset.width) * 100}%`, top: `${(values.y / asset.height) * 100}%`, width: `${(values.width / asset.width) * 100}%`, height: `${(values.height / asset.height) * 100}%` }} onPointerDown={(event) => startDrag(event, 'move')}><span className="crop-grid-line crop-grid-line-v one" /><span className="crop-grid-line crop-grid-line-v two" /><span className="crop-grid-line crop-grid-line-h one" /><span className="crop-grid-line crop-grid-line-h two" />{handles.map((handle) => <button type="button" aria-label={`调整证件照裁剪框 ${handle}`} className={`crop-handle ${handle}`} key={handle} onPointerDown={(event) => startDrag(event, 'resize', handle)} />)}</div></div><div className="direct-tool-caption"><span>{Math.round(values.width)} × {Math.round(values.height)} px</span><span>拖动角点调整比例</span></div></div>
+    <div className="control-section direct-tool-section"><div className="section-label">裁剪前预览 <span className="muted">{interaction === 'sample' ? `已取 ${samples.length} 个颜色样本` : '拖动框调整位置'}</span></div>{mattingMode === 'local' && <div className="segmented-grid two id-photo-interaction-tabs"><button className={interaction === 'crop' ? 'is-selected' : ''} onClick={() => setInteraction('crop')}>调整裁剪</button><button className={interaction === 'sample' ? 'is-selected' : ''} onClick={() => setInteraction('sample')}><Pipette size={13} /> 批量取色</button></div>}<div className={`direct-image-frame crop-interaction id-photo-crop-frame ${interaction === 'sample' ? 'is-sampling' : ''}`} ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerDown={pickBackgroundColor} onPointerMove={moveCrop} onPointerUp={endDrag} onPointerCancel={endDrag}><img ref={imageRef} src={asset.url} alt={interaction === 'sample' ? '点击证件照背景批量取色' : '证件照裁剪前预览'} /><div className="crop-box id-photo-crop-box" style={{ left: `${(values.x / asset.width) * 100}%`, top: `${(values.y / asset.height) * 100}%`, width: `${(values.width / asset.width) * 100}%`, height: `${(values.height / asset.height) * 100}%` }} onPointerDown={(event) => startDrag(event, 'move')}><span className="crop-grid-line crop-grid-line-v one" /><span className="crop-grid-line crop-grid-line-v two" /><span className="crop-grid-line crop-grid-line-h one" /><span className="crop-grid-line crop-grid-line-h two" />{handles.map((handle) => <button type="button" aria-label={`调整证件照裁剪框 ${handle}`} className={`crop-handle ${handle}`} key={handle} onPointerDown={(event) => startDrag(event, 'resize', handle)} />)}</div>{samples.map((sample, index) => <span className="background-pick-marker id-photo-pick-marker" key={`${sample.x}-${sample.y}-${index}`} style={{ left: `${((values.x + sample.x / 100 * values.width) / asset.width) * 100}%`, top: `${((values.y + sample.y / 100 * values.height) / asset.height) * 100}%`, backgroundColor: rgbToHex(sample.color) }}>{index + 1}</span>)}</div><div className="direct-tool-caption"><span>{Math.round(values.width)} × {Math.round(values.height)} px</span><span>{interaction === 'sample' ? '在裁剪框内连续点击背景' : '拖动角点调整比例'}</span></div>{samples.length > 0 && <button type="button" className="id-photo-clear-samples" onClick={() => { setSamples([]); setTargetColor(null); setPreview(null); }}><RotateCcw size={13} /> 清空 {samples.length} 个取色样本</button>}</div>
     <button className="apply-button" type="button" onClick={() => void generatePreview()} disabled={busy}>{busy ? '正在生成抠图预览…' : preview ? '重新生成抠图预览' : '生成抠图预览'}</button>
     {preview && <><div className="id-photo-matting-preview"><div className="section-label">抠图预览 <span className="muted">请确认边缘</span></div><div className="id-photo-subject-frame" ref={brushFrameRef} style={{ backgroundColor: background, aspectRatio: `${selectedSize.ratio}` }} onPointerDown={startBrush} onPointerMove={moveBrush} onPointerUp={(event) => void finishBrush(event)} onPointerCancel={(event) => void finishBrush(event)}><img src={preview.subject.url} alt="证件照透明抠图预览" />{strokePoints.length > 0 && <svg className="brush-mask-preview" viewBox={`0 0 ${subjectWidth} ${subjectHeight}`} preserveAspectRatio="none" aria-hidden="true">{strokePoints.length === 1 ? <circle cx={strokePoints[0].x * subjectWidth / 100} cy={strokePoints[0].y * subjectHeight / 100} r={brushSize / 2} fill={brushMode === 'erase' ? '#e78f49' : '#6f9fda'} opacity=".65" /> : <polyline points={brushPath} fill="none" stroke={brushMode === 'erase' ? '#e78f49' : '#6f9fda'} strokeWidth={brushSize} strokeLinecap="round" strokeLinejoin="round" opacity=".65" />}</svg>}</div><div className="direct-tool-caption"><span>拖动涂抹优化边缘</span><span>{busy ? '处理中…' : '透明主体预览'}</span></div></div><div className="control-section brush-control-section"><div className="segmented-grid two"><button className={brushMode === 'erase' ? 'is-selected' : ''} onClick={() => setBrushMode('erase')}><Paintbrush size={13} /> 擦除背景</button><button className={brushMode === 'restore' ? 'is-selected' : ''} onClick={() => setBrushMode('restore')}>还原区域</button></div><div className="range-heading"><span>画笔大小</span><strong>{brushSize} px</strong></div><input className="range-input" type="range" min="4" max={maxBrushSize} value={Math.min(brushSize, maxBrushSize)} onChange={(event) => setBrushSize(Number(event.target.value))} /></div><button className="apply-button id-photo-confirm-button" type="button" onClick={() => void onApply(preview, background, values, mattingMode)} disabled={busy}><CheckCircle2 size={17} /> 确认抠图并生成证件照</button></>}
   </>;

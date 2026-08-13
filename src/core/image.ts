@@ -408,19 +408,25 @@ export async function removeBackgroundAsset(asset: ImageAsset, options: LocalBac
   const total = canvas.width * canvas.height;
   const removeMask = new Uint8Array(total);
   const threshold = Math.max(0, Math.min(1, options.tolerance / 100));
-  const matches = (index: number) => colorDistance(pixels.data[index * 4], pixels.data[index * 4 + 1], pixels.data[index * 4 + 2], options.targetColor) <= threshold;
+  const targetColors = options.targetColors?.length ? options.targetColors : [options.targetColor];
+  const matches = (index: number) => targetColors.some((color) => colorDistance(pixels.data[index * 4], pixels.data[index * 4 + 1], pixels.data[index * 4 + 2], color) <= threshold);
 
   if (options.method === 'solid') {
     for (let index = 0; index < total; index += 1) if (matches(index)) removeMask[index] = 1;
   } else {
-    const startX = Math.max(0, Math.min(canvas.width - 1, Math.round((options.seedX / 100) * (canvas.width - 1))));
-    const startY = Math.max(0, Math.min(canvas.height - 1, Math.round((options.seedY / 100) * (canvas.height - 1))));
-    const start = startY * canvas.width + startX;
+    const seeds = options.seeds?.length ? options.seeds : [{ x: options.seedX, y: options.seedY }];
     const visited = new Uint8Array(total);
     const stack = new Int32Array(total);
     let stackSize = 0;
-    stack[stackSize++] = start;
-    visited[start] = 1;
+    for (const seed of seeds) {
+      const startX = Math.max(0, Math.min(canvas.width - 1, Math.round((seed.x / 100) * (canvas.width - 1))));
+      const startY = Math.max(0, Math.min(canvas.height - 1, Math.round((seed.y / 100) * (canvas.height - 1))));
+      const start = startY * canvas.width + startX;
+      if (!visited[start]) {
+        stack[stackSize++] = start;
+        visited[start] = 1;
+      }
+    }
     while (stackSize > 0) {
       const index = stack[--stackSize];
       if (!matches(index)) continue;

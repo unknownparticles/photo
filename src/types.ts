@@ -66,16 +66,23 @@ export interface WatermarkOptions {
 export interface LocalBackgroundRemovalOptions {
   method: 'solid' | 'connected';
   targetColor: [number, number, number];
+  targetColors?: [number, number, number][];
   seedX: number;
   seedY: number;
+  seeds?: BackgroundBrushPoint[];
   tolerance: number;
   feather: number;
+}
+
+export interface BackgroundColorSample extends BackgroundBrushPoint {
+  color: [number, number, number];
 }
 
 export interface IdPhotoMattingPreview {
   subject: ImageAsset;
   source: ImageAsset;
   targetColor: [number, number, number];
+  targetColors: [number, number, number][];
 }
 
 export type BackgroundBrushMode = 'erase' | 'restore';
