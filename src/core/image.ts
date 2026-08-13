@@ -1,4 +1,4 @@
-import type { BackgroundBrushStroke, CleanupBrushStroke, ExportFormat, ExportOptions, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, ProcessedAsset, SplitLine, WatermarkOptions } from '../types';
+import type { BackgroundBrushStroke, CleanupBrushStroke, ExportFormat, ExportOptions, IdPhotoClothingLayer, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, ProcessedAsset, SplitLine, WatermarkOptions } from '../types';
 
 const DEFAULT_MAX_EDGE = 8192;
 
@@ -242,8 +242,29 @@ export async function estimateDominantColor(asset: ImageAsset): Promise<[number,
   return dominant ? [Math.round(dominant.red / dominant.count), Math.round(dominant.green / dominant.count), Math.round(dominant.blue / dominant.count)] : [255, 255, 255];
 }
 
-export async function composeIdPhotoAsset(asset: ImageAsset, background: string) {
-  const canvas = await drawAsset(asset, { background });
+export async function composeIdPhotoAsset(asset: ImageAsset, background: string, clothingLayers: IdPhotoClothingLayer[] = []) {
+  const image = await loadImage(asset.blob);
+  const canvas = document.createElement('canvas');
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('当前浏览器无法创建证件照画布');
+  context.fillStyle = background;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  const drawClothing = async (layers: IdPhotoClothingLayer[]) => {
+    for (const layer of layers) {
+      if (!layer.visible) continue;
+      const clothing = await loadImage(layer.asset.blob);
+      const width = canvas.width * layer.width / 100;
+      const height = width * clothing.naturalHeight / clothing.naturalWidth;
+      context.drawImage(clothing, canvas.width * layer.x / 100, canvas.height * layer.y / 100, width, height);
+    }
+  };
+
+  await drawClothing(clothingLayers.filter((layer) => layer.placement === 'behind'));
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  await drawClothing(clothingLayers.filter((layer) => layer.placement === 'front'));
   const blob = await canvasToBlob(canvas, 'image/jpeg', 0.94);
   return createAssetFromBlob(blob, addSuffix(asset.name, '证件照'));
 }

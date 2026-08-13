@@ -85,6 +85,17 @@ export interface IdPhotoMattingPreview {
   targetColors: [number, number, number][];
 }
 
+export interface IdPhotoClothingLayer {
+  id: string;
+  name: string;
+  asset: ImageAsset;
+  x: number;
+  y: number;
+  width: number;
+  visible: boolean;
+  placement: 'behind' | 'front';
+}
+
 export type BackgroundBrushMode = 'erase' | 'restore';
 
 export interface BackgroundBrushPoint {

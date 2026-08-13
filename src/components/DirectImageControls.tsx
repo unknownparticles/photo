@@ -1,13 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { CheckCircle2, Columns3, Combine, Paintbrush, Pipette, Plus, RotateCcw, X } from 'lucide-react';
-import type { BackgroundBrushMode, BackgroundBrushPoint, BackgroundBrushStroke, BackgroundColorSample, IdPhotoMattingPreview, ImageAsset, SplitLine } from '../types';
+import { ArrowDownToLine, ArrowUpToLine, CheckCircle2, Columns3, Combine, Eye, EyeOff, Paintbrush, Pipette, Plus, RotateCcw, Shirt, Trash2, Upload, X } from 'lucide-react';
+import type { BackgroundBrushMode, BackgroundBrushPoint, BackgroundBrushStroke, BackgroundColorSample, IdPhotoClothingLayer, IdPhotoMattingPreview, ImageAsset, SplitLine } from '../types';
 import { useEditorOverlay } from './EditorOverlay';
 
 type CropRect = { x: number; y: number; width: number; height: number };
 type CropHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 type IdPhotoSize = { label: string; ratio: number };
+type ClothingCategory = 'suit' | 'blazer' | 'shirt' | 'tie-shirt';
+
+const clothingCategories: Array<{ id: ClothingCategory; label: string; count: number }> = [
+  { id: 'suit', label: '西服', count: 10 },
+  { id: 'blazer', label: '西装', count: 5 },
+  { id: 'shirt', label: '衬衫', count: 7 },
+  { id: 'tie-shirt', label: '领带衬衫', count: 5 },
+];
+
+function clothingUrl(category: ClothingCategory, index: number) {
+  return `${import.meta.env.BASE_URL}id-photo-clothing/${category}-${String(index + 1).padStart(2, '0')}.png`;
+}
 
 function clampValue(value: number, minimum: number, maximum: number) {
   return Math.max(minimum, Math.min(maximum, value));
@@ -118,7 +130,7 @@ export function DirectCropPanel({ asset, onApply }: { asset: ImageAsset; onApply
   </>;
 }
 
-export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asset: ImageAsset; onPreview: (values: CropRect, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', samples: BackgroundColorSample[], targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>; onBrushApply: (preview: IdPhotoMattingPreview, stroke: BackgroundBrushStroke) => Promise<IdPhotoMattingPreview>; onApply: (preview: IdPhotoMattingPreview, background: string, values: CropRect, mattingMode: 'local' | 'ai') => Promise<void> }) {
+export function IdPhotoPanel({ asset, onPreview, onBrushApply, onLoadClothing, onApply }: { asset: ImageAsset; onPreview: (values: CropRect, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', samples: BackgroundColorSample[], targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>; onBrushApply: (preview: IdPhotoMattingPreview, stroke: BackgroundBrushStroke) => Promise<IdPhotoMattingPreview>; onLoadClothing: (source: File | string, removeBackground: boolean) => Promise<ImageAsset | null>; onApply: (preview: IdPhotoMattingPreview, background: string, values: CropRect, mattingMode: 'local' | 'ai', clothingLayers: IdPhotoClothingLayer[]) => Promise<void> }) {
   const sizes: IdPhotoSize[] = [
     { label: '一寸 · 25 × 35 mm', ratio: 25 / 35 },
     { label: '二寸 · 35 × 49 mm', ratio: 35 / 49 },
@@ -137,6 +149,11 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asse
   const [feather, setFeather] = useState(3);
   const [preview, setPreview] = useState<IdPhotoMattingPreview | null>(null);
   const [busy, setBusy] = useState(false);
+  const [clothingBusy, setClothingBusy] = useState(false);
+  const [clothingCategory, setClothingCategory] = useState<ClothingCategory>('suit');
+  const [uploadMatting, setUploadMatting] = useState(false);
+  const [clothingLayers, setClothingLayers] = useState<IdPhotoClothingLayer[]>([]);
+  const [activeLayerId, setActiveLayerId] = useState<string | null>(null);
   const [brushMode, setBrushMode] = useState<BackgroundBrushMode>('erase');
   const [brushSize, setBrushSize] = useState(64);
   const [strokePoints, setStrokePoints] = useState<BackgroundBrushPoint[]>([]);
@@ -147,6 +164,8 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asse
   const brushRef = useRef(false);
   const brushPointsRef = useRef<BackgroundBrushPoint[]>([]);
   const dragRef = useRef<{ mode: 'move' | 'resize'; handle: CropHandle; start: { x: number; y: number }; initial: CropRect } | null>(null);
+  const clothingDragRef = useRef<{ id: string; startX: number; startY: number; x: number; y: number } | null>(null);
+  const clothingInputRef = useRef<HTMLInputElement>(null);
   const handles: CropHandle[] = ['nw', 'ne', 'se', 'sw'];
   const selectedSize = sizes.find((item) => item.label === sizeLabel) ?? sizes[0];
 
@@ -155,6 +174,8 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asse
     setPreview(null);
     setTargetColor(null);
     setSamples([]);
+    setClothingLayers([]);
+    setActiveLayerId(null);
   }, [asset.id, asset.width, asset.height, selectedSize.ratio]);
 
   function chooseSize(label: string) {
@@ -276,6 +297,46 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asse
     setBusy(false);
   }
 
+  async function addClothing(source: File | string, name: string, removeBackground = false) {
+    setClothingBusy(true);
+    try {
+      const clothingAsset = await onLoadClothing(source, removeBackground);
+      if (!clothingAsset) return;
+      const layer: IdPhotoClothingLayer = { id: crypto.randomUUID(), name, asset: clothingAsset, x: 5, y: 47, width: 90, visible: true, placement: 'front' };
+      setClothingLayers((current) => [...current, layer]);
+      setActiveLayerId(layer.id);
+    } finally {
+      setClothingBusy(false);
+    }
+  }
+
+  function updateLayer(id: string, values: Partial<IdPhotoClothingLayer>) {
+    setClothingLayers((current) => current.map((layer) => layer.id === id ? { ...layer, ...values } : layer));
+  }
+
+  function startClothingDrag(event: ReactPointerEvent<HTMLDivElement>, layer: IdPhotoClothingLayer) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    clothingDragRef.current = { id: layer.id, startX: event.clientX, startY: event.clientY, x: layer.x, y: layer.y };
+    setActiveLayerId(layer.id);
+  }
+
+  function moveClothing(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = clothingDragRef.current;
+    const frame = brushFrameRef.current;
+    if (!drag || !frame) return;
+    updateLayer(drag.id, {
+      x: clampValue(drag.x + (event.clientX - drag.startX) / frame.clientWidth * 100, -50, 100),
+      y: clampValue(drag.y + (event.clientY - drag.startY) / frame.clientHeight * 100, -50, 100),
+    });
+  }
+
+  function endClothingDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    clothingDragRef.current = null;
+  }
+
   const previewColor = targetColor ? rgbToHex(targetColor) : '#ffffff';
   const subjectWidth = preview?.subject.width ?? asset.width;
   const subjectHeight = preview?.subject.height ?? asset.height;
@@ -288,7 +349,10 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onApply }: { asse
     {mattingMode === 'local' && <div className="control-section"><div className="segmented-grid two"><button className={method === 'connected' ? 'is-selected' : ''} onClick={() => { setMethod('connected'); setPreview(null); }}>联通色块</button><button className={method === 'solid' ? 'is-selected' : ''} onClick={() => { setMethod('solid'); setPreview(null); }}>全图颜色</button></div><div className="color-field"><span>默认目标颜色</span><label><input type="color" value={previewColor} onChange={(event) => { setTargetColor(hexToRgb(event.target.value)); setPreview(null); }} /><b>{previewColor.toUpperCase()}</b></label></div><div className="range-heading"><span>色彩匹配度</span><strong>{tolerance}%</strong></div><input className="range-input" type="range" min="1" max="100" value={tolerance} onChange={(event) => { setTolerance(Number(event.target.value)); setPreview(null); }} /><div className="range-heading"><span>羽化半径</span><strong>{feather} px</strong></div><input className="range-input" type="range" min="0" max="40" value={feather} onChange={(event) => { setFeather(Number(event.target.value)); setPreview(null); }} /><div className="direct-tool-caption"><span>首次预览自动选择占比最大的颜色</span><span>参数可调整</span></div></div>}
     <div className="control-section direct-tool-section"><div className="section-label">裁剪前预览 <span className="muted">{interaction === 'sample' ? `已取 ${samples.length} 个颜色样本` : '拖动框调整位置'}</span></div>{mattingMode === 'local' && <div className="segmented-grid two id-photo-interaction-tabs"><button className={interaction === 'crop' ? 'is-selected' : ''} onClick={() => setInteraction('crop')}>调整裁剪</button><button className={interaction === 'sample' ? 'is-selected' : ''} onClick={() => setInteraction('sample')}><Pipette size={13} /> 批量取色</button></div>}<div className={`direct-image-frame crop-interaction id-photo-crop-frame ${interaction === 'sample' ? 'is-sampling' : ''}`} ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerDown={pickBackgroundColor} onPointerMove={moveCrop} onPointerUp={endDrag} onPointerCancel={endDrag}><img ref={imageRef} src={asset.url} alt={interaction === 'sample' ? '点击证件照背景批量取色' : '证件照裁剪前预览'} /><div className="crop-box id-photo-crop-box" style={{ left: `${(values.x / asset.width) * 100}%`, top: `${(values.y / asset.height) * 100}%`, width: `${(values.width / asset.width) * 100}%`, height: `${(values.height / asset.height) * 100}%` }} onPointerDown={(event) => startDrag(event, 'move')}><span className="crop-grid-line crop-grid-line-v one" /><span className="crop-grid-line crop-grid-line-v two" /><span className="crop-grid-line crop-grid-line-h one" /><span className="crop-grid-line crop-grid-line-h two" />{handles.map((handle) => <button type="button" aria-label={`调整证件照裁剪框 ${handle}`} className={`crop-handle ${handle}`} key={handle} onPointerDown={(event) => startDrag(event, 'resize', handle)} />)}</div>{samples.map((sample, index) => <span className="background-pick-marker id-photo-pick-marker" key={`${sample.x}-${sample.y}-${index}`} style={{ left: `${((values.x + sample.x / 100 * values.width) / asset.width) * 100}%`, top: `${((values.y + sample.y / 100 * values.height) / asset.height) * 100}%`, backgroundColor: rgbToHex(sample.color) }}>{index + 1}</span>)}</div><div className="direct-tool-caption"><span>{Math.round(values.width)} × {Math.round(values.height)} px</span><span>{interaction === 'sample' ? '在裁剪框内连续点击背景' : '拖动角点调整比例'}</span></div>{samples.length > 0 && <><div className="id-photo-sample-list">{samples.map((sample, index) => <button type="button" key={`${rgbToHex(sample.color)}-${index}`} onClick={() => { setSamples((current) => current.filter((_, sampleIndex) => sampleIndex !== index)); setPreview(null); }} title={`移除样本 ${index + 1}`}><span style={{ backgroundColor: rgbToHex(sample.color) }} />{index + 1}<X size={11} /></button>)}</div><button type="button" className="id-photo-clear-samples" onClick={() => { setSamples([]); setTargetColor(null); setPreview(null); }}><RotateCcw size={13} /> 清空 {samples.length} 个取色样本</button></>}</div>
     <button className="apply-button" type="button" onClick={() => void generatePreview()} disabled={busy}>{busy ? '正在生成抠图预览…' : preview ? '重新生成抠图预览' : '生成抠图预览'}</button>
-    {preview && <><div className="id-photo-matting-preview"><div className="section-label">抠图预览 <span className="muted">请确认边缘</span></div><div className="id-photo-subject-frame" ref={brushFrameRef} style={{ backgroundColor: background, aspectRatio: `${selectedSize.ratio}` }} onPointerDown={startBrush} onPointerMove={moveBrush} onPointerUp={(event) => void finishBrush(event)} onPointerCancel={(event) => void finishBrush(event)}><img src={preview.subject.url} alt="证件照透明抠图预览" />{strokePoints.length > 0 && <svg className="brush-mask-preview" viewBox={`0 0 ${subjectWidth} ${subjectHeight}`} preserveAspectRatio="none" aria-hidden="true">{strokePoints.length === 1 ? <circle cx={strokePoints[0].x * subjectWidth / 100} cy={strokePoints[0].y * subjectHeight / 100} r={brushSize / 2} fill={brushMode === 'erase' ? '#e78f49' : '#6f9fda'} opacity=".65" /> : <polyline points={brushPath} fill="none" stroke={brushMode === 'erase' ? '#e78f49' : '#6f9fda'} strokeWidth={brushSize} strokeLinecap="round" strokeLinejoin="round" opacity=".65" />}</svg>}</div><div className="direct-tool-caption"><span>拖动涂抹优化边缘</span><span>{busy ? '处理中…' : '透明主体预览'}</span></div></div><div className="control-section brush-control-section"><div className="segmented-grid two"><button className={brushMode === 'erase' ? 'is-selected' : ''} onClick={() => setBrushMode('erase')}><Paintbrush size={13} /> 擦除背景</button><button className={brushMode === 'restore' ? 'is-selected' : ''} onClick={() => setBrushMode('restore')}>还原区域</button></div><div className="range-heading"><span>画笔大小</span><strong>{brushSize} px</strong></div><input className="range-input" type="range" min="4" max={maxBrushSize} value={Math.min(brushSize, maxBrushSize)} onChange={(event) => setBrushSize(Number(event.target.value))} /></div><button className="apply-button id-photo-confirm-button" type="button" onClick={() => void onApply(preview, background, values, mattingMode)} disabled={busy}><CheckCircle2 size={17} /> 确认抠图并生成证件照</button></>}
+    {preview && <><div className="id-photo-matting-preview"><div className="section-label">图层预览 <span className="muted">拖动服装调整位置</span></div><div className="id-photo-subject-frame clothing-composer" ref={brushFrameRef} style={{ backgroundColor: background, aspectRatio: `${selectedSize.ratio}` }} onPointerDown={startBrush} onPointerMove={moveBrush} onPointerUp={(event) => void finishBrush(event)} onPointerCancel={(event) => void finishBrush(event)}>{clothingLayers.filter((layer) => layer.placement === 'behind' && layer.visible).map((layer) => <div className={`clothing-canvas-layer ${activeLayerId === layer.id ? 'is-active' : ''}`} key={layer.id} style={{ left: `${layer.x}%`, top: `${layer.y}%`, width: `${layer.width}%`, zIndex: 1 }} onPointerDown={(event) => startClothingDrag(event, layer)} onPointerMove={moveClothing} onPointerUp={endClothingDrag} onPointerCancel={endClothingDrag}><img src={layer.asset.url} alt={layer.name} /></div>)}<img className="id-photo-subject-layer" src={preview.subject.url} alt="证件照透明抠图预览" />{clothingLayers.filter((layer) => layer.placement === 'front' && layer.visible).map((layer) => <div className={`clothing-canvas-layer ${activeLayerId === layer.id ? 'is-active' : ''}`} key={layer.id} style={{ left: `${layer.x}%`, top: `${layer.y}%`, width: `${layer.width}%`, zIndex: 3 }} onPointerDown={(event) => startClothingDrag(event, layer)} onPointerMove={moveClothing} onPointerUp={endClothingDrag} onPointerCancel={endClothingDrag}><img src={layer.asset.url} alt={layer.name} /></div>)}{strokePoints.length > 0 && <svg className="brush-mask-preview" viewBox={`0 0 ${subjectWidth} ${subjectHeight}`} preserveAspectRatio="none" aria-hidden="true">{strokePoints.length === 1 ? <circle cx={strokePoints[0].x * subjectWidth / 100} cy={strokePoints[0].y * subjectHeight / 100} r={brushSize / 2} fill={brushMode === 'erase' ? '#e78f49' : '#6f9fda'} opacity=".65" /> : <polyline points={brushPath} fill="none" stroke={brushMode === 'erase' ? '#e78f49' : '#6f9fda'} strokeWidth={brushSize} strokeLinecap="round" strokeLinejoin="round" opacity=".65" />}</svg>}</div><div className="direct-tool-caption"><span>{clothingLayers.filter((layer) => layer.visible).length ? `${clothingLayers.filter((layer) => layer.visible).length + 1} 个可见图层` : '人物图层'}</span><span>{busy ? '处理中…' : '透明主体预览'}</span></div></div><div className="control-section brush-control-section"><div className="segmented-grid two"><button className={brushMode === 'erase' ? 'is-selected' : ''} onClick={() => setBrushMode('erase')}><Paintbrush size={13} /> 擦除背景</button><button className={brushMode === 'restore' ? 'is-selected' : ''} onClick={() => setBrushMode('restore')}>还原区域</button></div><div className="range-heading"><span>画笔大小</span><strong>{brushSize} px</strong></div><input className="range-input" type="range" min="4" max={maxBrushSize} value={Math.min(brushSize, maxBrushSize)} onChange={(event) => setBrushSize(Number(event.target.value))} /></div>
+    <div className="control-section clothing-section"><div className="section-label">服装素材 <span className="muted">内置 {clothingCategories.reduce((sum, item) => sum + item.count, 0)} 款</span></div><div className="clothing-category-tabs">{clothingCategories.map((category) => <button type="button" key={category.id} className={clothingCategory === category.id ? 'is-selected' : ''} onClick={() => setClothingCategory(category.id)}>{category.label}</button>)}</div><div className="clothing-library">{Array.from({ length: clothingCategories.find((item) => item.id === clothingCategory)?.count ?? 0 }, (_, index) => <button type="button" key={index} disabled={clothingBusy} onClick={() => void addClothing(clothingUrl(clothingCategory, index), `${clothingCategories.find((item) => item.id === clothingCategory)?.label} ${index + 1}`)} title={`添加${clothingCategories.find((item) => item.id === clothingCategory)?.label} ${index + 1}`}><img src={clothingUrl(clothingCategory, index)} alt={`${clothingCategory} ${index + 1}`} /><span><Plus size={12} /></span></button>)}</div><input ref={clothingInputRef} type="file" accept="image/*" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void addClothing(file, file.name, uploadMatting); event.currentTarget.value = ''; }} /><div className="clothing-upload-row"><button type="button" className="clothing-upload-button" onClick={() => clothingInputRef.current?.click()} disabled={clothingBusy}><Upload size={14} />{clothingBusy ? '正在处理…' : '上传服装'}</button><button type="button" className={`toggle-row compact ${uploadMatting ? 'is-on' : ''}`} onClick={() => setUploadMatting((value) => !value)}><span className="toggle"><span /></span><span>上传后抠图</span></button></div></div>
+    <div className="control-section"><div className="section-label">图层 <span className="muted">上方优先显示</span></div><div className="id-photo-layer-list">{[...clothingLayers].reverse().map((layer) => <div className={activeLayerId === layer.id ? 'is-active' : ''} key={layer.id} onClick={() => setActiveLayerId(layer.id)}><img src={layer.asset.url} alt="" /><span><strong>{layer.name}</strong><small>{layer.placement === 'front' ? '人物前方' : '人物后方'} · 宽度 {Math.round(layer.width)}%</small></span><button type="button" title={layer.visible ? '隐藏图层' : '显示图层'} onClick={(event) => { event.stopPropagation(); updateLayer(layer.id, { visible: !layer.visible }); }}>{layer.visible ? <Eye size={14} /> : <EyeOff size={14} />}</button><button type="button" title={layer.placement === 'front' ? '移到人物后方' : '移到人物前方'} onClick={(event) => { event.stopPropagation(); updateLayer(layer.id, { placement: layer.placement === 'front' ? 'behind' : 'front' }); }}>{layer.placement === 'front' ? <ArrowDownToLine size={14} /> : <ArrowUpToLine size={14} />}</button><button type="button" title="删除图层" onClick={(event) => { event.stopPropagation(); setClothingLayers((current) => current.filter((item) => item.id !== layer.id)); }}><Trash2 size={14} /></button></div>)}<div className="id-photo-base-layer"><Shirt size={16} /><span><strong>人物</strong><small>基础图层</small></span><Eye size={14} /></div></div>{activeLayerId && clothingLayers.some((layer) => layer.id === activeLayerId) && <><div className="range-heading"><span>服装大小</span><strong>{Math.round(clothingLayers.find((layer) => layer.id === activeLayerId)?.width ?? 0)}%</strong></div><input className="range-input" type="range" min="20" max="180" value={clothingLayers.find((layer) => layer.id === activeLayerId)?.width ?? 90} onChange={(event) => updateLayer(activeLayerId, { width: Number(event.target.value) })} /></>}</div>
+    <button className="apply-button id-photo-confirm-button" type="button" onClick={() => void onApply(preview, background, values, mattingMode, clothingLayers)} disabled={busy || clothingBusy}><CheckCircle2 size={17} /> 生成证件照</button></>}
   </>;
 }
 
