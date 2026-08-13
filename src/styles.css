@@ -216,8 +216,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .id-photo-crop-frame.is-sampling { cursor: crosshair; }
 .id-photo-crop-frame.is-sampling .id-photo-crop-box { pointer-events: none; }
 .id-photo-pick-marker { z-index: 4; display: grid; place-items: center; color: #fff; font: 700 8px 'DM Mono', monospace; text-shadow: 0 1px 2px rgba(0,0,0,.8); }
+.id-photo-sample-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.id-photo-sample-list button { display: inline-flex; align-items: center; gap: 4px; padding: 4px 6px; border: 1px solid #e0e7df; border-radius: 5px; color: #657168; background: #fbfcfa; font: 9px 'DM Mono', monospace; }
+.id-photo-sample-list button > span { width: 12px; height: 12px; border: 1px solid rgba(0,0,0,.15); border-radius: 3px; }
 .id-photo-clear-samples { display: inline-flex; align-items: center; gap: 5px; margin-top: 9px; padding: 6px 8px; border: 1px solid #e0e7df; border-radius: 6px; color: #7d8a80; background: #fbfcfa; font-size: 9px; }
-.app-shell.theme-dark .id-photo-clear-samples { color: #b0bab1; background: #202522; border-color: #3a433d; }
+.app-shell.theme-dark .id-photo-clear-samples, .app-shell.theme-dark .id-photo-sample-list button { color: #b0bab1; background: #202522; border-color: #3a433d; }
 .brush-control-section { display: flex; flex-direction: column; gap: 11px; }
 .brush-control-section .segmented-grid button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
 .brush-interaction { cursor: crosshair; }
