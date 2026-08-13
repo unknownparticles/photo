@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import type { LucideIcon } from 'lucide-react';
 import {
   AlertTriangle,
@@ -73,6 +74,7 @@ import {
 import { useAppStore } from './store';
 import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, BackgroundColorSample, CleanupBrushStroke, ExportFormat, IdPhotoMattingPreview, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
 import { DirectCropPanel, DirectSplitPanel, IdPhotoPanel } from './components/DirectImageControls';
+import { EditorOverlayContext, useEditorOverlay } from './components/EditorOverlay';
 
 type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
 
@@ -180,13 +182,14 @@ function clampPreviewOffset(offset: PreviewPoint, zoom: number, image: { width: 
   };
 }
 
-function PreviewImage({ asset }: { asset: ImageAsset }) {
+function PreviewImage({ asset, onOverlayHost }: { asset: ImageAsset; onOverlayHost: (host: HTMLDivElement | null) => void }) {
   const stageRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const pointersRef = useRef(new Map<number, PreviewPoint>());
   const interactionRef = useRef<PreviewInteraction>(null);
   const [zoom, setZoom] = useState(MIN_PREVIEW_ZOOM);
   const [offset, setOffset] = useState<PreviewPoint>({ x: 0, y: 0 });
+  const [displaySize, setDisplaySize] = useState({ width: 0, height: 0 });
 
   const measure = useCallback(() => {
     const stage = stageRef.current;
@@ -194,8 +197,16 @@ function PreviewImage({ asset }: { asset: ImageAsset }) {
     if (!stage || !image) return null;
     return {
       stage: { width: stage.clientWidth, height: stage.clientHeight },
-      image: { width: image.offsetWidth, height: image.offsetHeight },
+      image: displaySize,
     };
+  }, [displaySize]);
+
+  const fitImage = useCallback(() => {
+    const stage = stageRef.current;
+    const image = imageRef.current;
+    if (!stage || !image?.naturalWidth || !image.naturalHeight) return;
+    const scale = Math.min((stage.clientWidth - 32) / image.naturalWidth, (stage.clientHeight - 32) / image.naturalHeight, 1);
+    setDisplaySize({ width: Math.max(1, image.naturalWidth * scale), height: Math.max(1, image.naturalHeight * scale) });
   }, []);
 
   const updateTransform = useCallback((nextZoom: number, nextOffset: PreviewPoint) => {
@@ -207,11 +218,11 @@ function PreviewImage({ asset }: { asset: ImageAsset }) {
   }, [measure]);
 
   function handleImageLoad() {
-    updateTransform(zoom, offset);
+    fitImage();
   }
 
   useLayoutEffect(() => {
-    const handleResize = () => updateTransform(zoom, offset);
+    const handleResize = () => fitImage();
     const observer = new ResizeObserver(handleResize);
     if (stageRef.current) observer.observe(stageRef.current);
     window.addEventListener('resize', handleResize);
@@ -219,7 +230,13 @@ function PreviewImage({ asset }: { asset: ImageAsset }) {
       observer.disconnect();
       window.removeEventListener('resize', handleResize);
     };
-  }, [offset, updateTransform, zoom]);
+  }, [fitImage]);
+
+  useLayoutEffect(() => {
+    const measured = measure();
+    if (!measured) return;
+    setOffset((current) => clampPreviewOffset(current, zoom, measured.image, measured.stage));
+  }, [displaySize.height, displaySize.width, measure, zoom]);
 
   useEffect(() => {
     setZoom(MIN_PREVIEW_ZOOM);
@@ -315,7 +332,10 @@ function PreviewImage({ asset }: { asset: ImageAsset }) {
       onPointerUp={handlePointerEnd}
       onPointerCancel={handlePointerEnd}
     >
-      <img ref={imageRef} className="main-preview" src={asset.url} alt={asset.name} onLoad={handleImageLoad} style={{ transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${zoom})` }} />
+      <div className="preview-image-canvas" style={{ width: displaySize.width, height: displaySize.height, transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${zoom})` }}>
+        <img ref={imageRef} className="main-preview" src={asset.url} alt={asset.name} onLoad={handleImageLoad} />
+        <div ref={onOverlayHost} className="editor-overlay-host" />
+      </div>
     </div>
   );
 }
@@ -938,18 +958,21 @@ function Workspace({
   canRedo: boolean;
   setNotice: (notice: Notice) => void;
 }) {
+  const [overlayHost, setOverlayHost] = useState<HTMLDivElement | null>(null);
   const activeToolDefinition = tools.find((tool) => tool.id === activeTool) ?? tools[0];
   const Icon = activeToolDefinition.icon;
   return (
+    <EditorOverlayContext.Provider value={overlayHost}>
     <main className="workspace-page">
       <div className="workspace-breadcrumb"><button className="back-button" onClick={onClear}><ArrowLeft size={15} /> 工具箱</button><span>/</span><span>{activeToolDefinition.label}</span><div className="workspace-actions"><button className="secondary-button" onClick={onAddFiles}><Plus size={16} /> 添加图片</button><button className="secondary-button" onClick={onExportAll}><Download size={16} /> 全部下载</button><button className="primary-button compact" onClick={onExport}><FileDown size={16} /> 导出当前</button></div></div>
       <div className="asset-strip"><div className="asset-strip-label"><span className="eyebrow">WORKSPACE</span><strong>{assets.length} 张图片</strong></div><div className="asset-thumbs">{assets.map((asset, index) => <div className="asset-thumb-wrap" key={asset.id}><button className={`asset-thumb ${asset.id === activeAsset?.id ? 'is-active' : ''}`} aria-label={`选中 ${asset.name}`} aria-pressed={asset.id === activeAsset?.id} onClick={() => onSelectAsset(asset.id)}><img src={asset.url} alt={asset.name} /><span>{index + 1}</span></button><button className="asset-delete-button" title={`删除 ${asset.name}`} aria-label={`删除 ${asset.name}`} onClick={() => onDeleteAsset(asset.id)}><X size={11} /></button></div>)}<button className="add-thumb" title="添加图片" aria-label="添加图片" onClick={onAddFiles}><Plus size={17} /></button></div><div className="asset-total">总计 {formatBytes(assets.reduce((sum, asset) => sum + asset.size, 0))}</div></div>
       <div className="workspace-layout">
         <aside className="tool-sidebar"><div className="sidebar-title"><PanelLeft size={15} /><span>工具</span></div><div className="sidebar-list">{tools.map((tool) => { const ToolIcon = tool.icon; return <button className={`sidebar-tool ${activeTool === tool.id ? 'is-active' : ''}`} key={tool.id} onClick={() => onSelectTool(tool.id)} title={tool.description}><ToolIcon size={17} /><span>{tool.label}</span>{activeTool === tool.id && <span className="active-bar" />}</button>; })}</div><div className="sidebar-bottom"><ShieldCheck size={16} /><small>本地模式<br />Local only</small></div></aside>
-        <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 实时预览</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <PreviewImage asset={activeAsset} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeAsset && <button className="icon-button" title="删除当前图片" aria-label="删除当前图片" onClick={() => onDeleteAsset(activeAsset.id)}><Trash2 size={16} /></button>}</div></div></section>
+        <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 直接编辑</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <PreviewImage asset={activeAsset} onOverlayHost={setOverlayHost} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeAsset && <button className="icon-button" title="删除当前图片" aria-label="删除当前图片" onClick={() => onDeleteAsset(activeAsset.id)}><Trash2 size={16} /></button>}</div></div></section>
         <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onIdPhotoPreview={onIdPhotoPreview} onIdPhotoBrush={onIdPhotoBrush} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onCleanup={onCleanup} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
       </div>
     </main>
+    </EditorOverlayContext.Provider>
   );
 }
 
@@ -1056,6 +1079,7 @@ function EditPanel({ onApply }: { onApply: (values: { brightness: number; contra
 }
 
 function WatermarkPanel({ asset, onApply }: { asset: ImageAsset; onApply: (options: WatermarkOptions) => Promise<void> }) {
+  const overlayHost = useEditorOverlay();
   const [kind, setKind] = useState<'text' | 'image'>('text');
   const [text, setText] = useState('Alun Image');
   const [opacity, setOpacity] = useState(0.72);
@@ -1123,11 +1147,13 @@ function WatermarkPanel({ asset, onApply }: { asset: ImageAsset; onApply: (optio
   }
 
   const options: WatermarkOptions = { kind, text, opacity, position, x, y, width, fontSize: Math.max(2, Math.min(12, width / 5.6)), image: watermarkImage };
+  const overlay = <div className="editor-tool-overlay watermark-interaction" ref={frameRef} onPointerDown={(event) => event.stopPropagation()} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>{(kind === 'text' || watermarkImage) && <div className={`watermark-overlay ${kind}`} style={{ left: `${x}%`, top: `${y}%`, width: `${width}%`, opacity }} onPointerDown={(event) => startDrag(event, event.target instanceof Element && event.target.closest('.watermark-resize-handle') ? 'resize' : 'move')}>{kind === 'text' ? text : <img src={watermarkImage?.url} alt="图片水印" />}<button type="button" className="watermark-resize-handle" aria-label="调整水印大小" /></div>}</div>;
   return <>
+    {overlayHost && createPortal(overlay, overlayHost)}
     <PanelIntro title="添加水印" description="文字或图片水印都可直接在原图比例画布上拖动和缩放。" />
     <input ref={fileInput} className="visually-hidden" type="file" accept="image/*" onChange={(event) => void chooseWatermark(event.target.files?.[0])} />
     <div className="control-section"><div className="segmented-grid two"><button className={kind === 'text' ? 'is-selected' : ''} onClick={() => setKind('text')}>文字水印</button><button className={kind === 'image' ? 'is-selected' : ''} onClick={() => { setKind('image'); fileInput.current?.click(); }}>图片水印</button></div>{kind === 'text' ? <Field label="水印文字"><input value={text} maxLength={40} onChange={(event) => setText(event.target.value)} /></Field> : <button className="watermark-file-button" onClick={() => fileInput.current?.click()}><ImagePlus size={16} /><span>{watermarkImage?.name ?? '选择一张水印图片'}</span></button>}<div className="range-heading"><span>透明度</span><strong>{Math.round(opacity * 100)}%</strong></div><input className="range-input" type="range" min="0.1" max="1" step="0.01" value={opacity} onChange={(event) => setOpacity(Number(event.target.value))} /></div>
-    <div className="control-section direct-tool-section"><div className="direct-image-frame watermark-interaction" ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}><img src={asset.url} alt="水印预览原图" />{(kind === 'text' || watermarkImage) && <div className={`watermark-overlay ${kind}`} style={{ left: `${x}%`, top: `${y}%`, width: `${width}%` }} onPointerDown={(event) => startDrag(event, event.target instanceof Element && event.target.closest('.watermark-resize-handle') ? 'resize' : 'move')}>{kind === 'text' ? text : <img src={watermarkImage?.url} alt="图片水印" />}<button type="button" className="watermark-resize-handle" aria-label="调整水印大小" /></div>}</div><div className="direct-tool-caption"><span>拖动水印调整位置</span><span>拖动角点调整大小</span></div></div>
+    <div className="inline-info"><Droplets size={16} /><span>在中央图片上拖动水印，拖动右下角控制点调整大小。</span></div>
     <div className="control-section"><div className="section-label">快速定位</div><div className="position-grid">{['left-top', 'center-top', 'right-top', 'left-bottom', 'center', 'right-bottom'].map((value) => <button key={value} className={position === value ? 'is-selected' : ''} onClick={() => setPreset(value)}><span /></button>)}</div></div>
     <ApplyButton onClick={() => void onApply(options)} label="应用水印" />
   </>;
