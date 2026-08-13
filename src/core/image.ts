@@ -1,4 +1,4 @@
-import type { BackgroundBrushStroke, ExportFormat, ExportOptions, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, ProcessedAsset, SplitLine, WatermarkOptions } from '../types';
+import type { BackgroundBrushStroke, CleanupBrushStroke, ExportFormat, ExportOptions, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, ProcessedAsset, SplitLine, WatermarkOptions } from '../types';
 
 const DEFAULT_MAX_EDGE = 8192;
 
@@ -496,6 +496,68 @@ export async function applyBackgroundBrush(asset: ImageAsset, sourceAsset: Image
   const blob = await canvasToBlob(canvas, 'image/png');
   const next = await createAssetFromBlob(blob, addSuffix(asset.name, stroke.mode === 'erase' ? '擦除' : '还原'));
   return { ...next, backgroundSourceBlob: sourceAsset.backgroundSourceBlob ?? sourceAsset.blob };
+}
+
+export async function applyCleanupBrush(asset: ImageAsset, stroke: CleanupBrushStroke) {
+  const canvas = await drawAsset(asset);
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('当前浏览器无法创建画布');
+  const image = context.getImageData(0, 0, canvas.width, canvas.height);
+  const source = new Uint8ClampedArray(image.data);
+  const mask = new Uint8Array(canvas.width * canvas.height);
+  const radius = Math.max(1, Math.round(stroke.size / 2));
+  const points = stroke.points.map((point) => ({
+    x: Math.round(Math.max(0, Math.min(100, point.x)) / 100 * (canvas.width - 1)),
+    y: Math.round(Math.max(0, Math.min(100, point.y)) / 100 * (canvas.height - 1)),
+  }));
+  if (!points.length) return asset;
+
+  const paintCircle = (centerX: number, centerY: number) => {
+    const top = Math.max(0, centerY - radius);
+    const bottom = Math.min(canvas.height - 1, centerY + radius);
+    const left = Math.max(0, centerX - radius);
+    const right = Math.min(canvas.width - 1, centerX + radius);
+    for (let y = top; y <= bottom; y += 1) {
+      for (let x = left; x <= right; x += 1) {
+        if ((x - centerX) ** 2 + (y - centerY) ** 2 <= radius ** 2) mask[y * canvas.width + x] = 1;
+      }
+    }
+  };
+  for (let index = 0; index < points.length; index += 1) {
+    const start = points[Math.max(0, index - 1)];
+    const end = points[index];
+    const steps = Math.max(1, Math.ceil(Math.hypot(end.x - start.x, end.y - start.y) / Math.max(1, radius / 3)));
+    for (let step = 0; step <= steps; step += 1) paintCircle(Math.round(start.x + (end.x - start.x) * step / steps), Math.round(start.y + (end.y - start.y) * step / steps));
+  }
+
+  const searchRadius = Math.min(160, Math.max(radius + 3, Math.round(radius * (stroke.mode === 'ai' ? 2.5 : 1.35))));
+  for (let y = 0; y < canvas.height; y += 1) {
+    for (let x = 0; x < canvas.width; x += 1) {
+      const pixelIndex = y * canvas.width + x;
+      if (!mask[pixelIndex]) continue;
+      let red = 0; let green = 0; let blue = 0; let alpha = 0; let weightTotal = 0;
+      const samples = stroke.mode === 'ai' ? 32 : 12;
+      for (let sample = 0; sample < samples; sample += 1) {
+        const angle = (sample / samples) * Math.PI * 2;
+        for (let distance = radius + 1; distance <= searchRadius; distance += Math.max(2, Math.round(radius / 4))) {
+          const sampleX = Math.round(x + Math.cos(angle) * distance);
+          const sampleY = Math.round(y + Math.sin(angle) * distance);
+          if (sampleX < 0 || sampleY < 0 || sampleX >= canvas.width || sampleY >= canvas.height || mask[sampleY * canvas.width + sampleX]) continue;
+          const sourceIndex = (sampleY * canvas.width + sampleX) * 4;
+          const weight = 1 / Math.max(1, distance - radius);
+          red += source[sourceIndex] * weight; green += source[sourceIndex + 1] * weight; blue += source[sourceIndex + 2] * weight; alpha += source[sourceIndex + 3] * weight; weightTotal += weight;
+          break;
+        }
+      }
+      if (weightTotal > 0) {
+        const target = pixelIndex * 4;
+        image.data[target] = red / weightTotal; image.data[target + 1] = green / weightTotal; image.data[target + 2] = blue / weightTotal; image.data[target + 3] = alpha / weightTotal;
+      }
+    }
+  }
+  context.putImageData(image, 0, 0);
+  const blob = await canvasToBlob(canvas, 'image/png');
+  return createAssetFromBlob(blob, addSuffix(asset.name, stroke.mode === 'ai' ? 'AI去水印' : '消除'));
 }
 
 export async function applyWatermark(asset: ImageAsset, options: WatermarkOptions) {

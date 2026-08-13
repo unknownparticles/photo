@@ -6,7 +6,8 @@ export type ToolId =
   | 'compress'
   | 'convert'
   | 'matting'
-  | 'ai'
+  | 'cleanup'
+  | 'ai-upscale'
   | 'edit'
   | 'watermark'
   | 'metadata'
@@ -86,6 +87,12 @@ export interface BackgroundBrushPoint {
 
 export interface BackgroundBrushStroke {
   mode: BackgroundBrushMode;
+  size: number;
+  points: BackgroundBrushPoint[];
+}
+
+export interface CleanupBrushStroke {
+  mode: 'standard' | 'ai';
   size: number;
   points: BackgroundBrushPoint[];
 }

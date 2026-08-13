@@ -50,6 +50,7 @@ import { aiAdapter } from './core/ai';
 import {
   applyAdjustments,
   applyBackgroundBrush,
+  applyCleanupBrush,
   applyWatermark,
   asProcessedAsset,
   createAssetFromBlob,
@@ -70,7 +71,7 @@ import {
   updateImageMetadata,
 } from './core/image';
 import { useAppStore } from './store';
-import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, ExportFormat, IdPhotoMattingPreview, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
+import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, CleanupBrushStroke, ExportFormat, IdPhotoMattingPreview, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
 import { DirectCropPanel, DirectSplitPanel, IdPhotoPanel } from './components/DirectImageControls';
 
 type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
@@ -91,8 +92,9 @@ const tools: ToolDefinition[] = [
   { id: 'merge', label: '拼图', description: '多图自由合并', icon: Combine, category: '基础处理', accent: 'pink' },
   { id: 'compress', label: '压缩', description: '更小体积交付', icon: Gauge, category: '基础处理', accent: 'teal' },
   { id: 'convert', label: '格式', description: 'JPG / PNG / WebP', icon: ArrowRightLeft, category: '基础处理', accent: 'violet' },
-  { id: 'matting', label: '抠图', description: '离线擦除背景', icon: Eraser, category: '智能工具', accent: 'orange' },
-  { id: 'ai', label: 'AI 工具', description: '模型抠图与超分', icon: Sparkles, category: '智能工具', accent: 'yellow' },
+  { id: 'matting', label: '抠图', description: '本地与 AI 智能抠图', icon: Eraser, category: '智能工具', accent: 'orange' },
+  { id: 'cleanup', label: '消除笔', description: 'AI 去水印与普通消除', icon: Paintbrush, category: '智能工具', accent: 'pink' },
+  { id: 'ai-upscale', label: 'AI 超分', description: '智能放大恢复细节', icon: Sparkles, category: '智能工具', accent: 'yellow' },
   { id: 'edit', label: '编辑', description: '色彩与滤镜', icon: SlidersHorizontal, category: '基础处理', accent: 'blue' },
   { id: 'watermark', label: '水印', description: '文字与图片标记', icon: Droplets, category: '工作流', accent: 'cyan' },
   { id: 'metadata', label: '信息', description: 'EXIF 与隐私', icon: ShieldCheck, category: '工作流', accent: 'green' },
@@ -578,6 +580,16 @@ function App() {
     await replaceActive(next, stroke.mode === 'erase' ? '抠图擦除' : '抠图还原', `${stroke.mode === 'erase' ? '擦除' : '还原'} · 画笔 ${Math.round(stroke.size)} px`);
   }
 
+  async function applyCleanup(stroke: CleanupBrushStroke) {
+    if (!activeAsset) return;
+    try {
+      const next = await applyCleanupBrush(activeAsset, stroke);
+      await replaceActive(next, stroke.mode === 'ai' ? 'AI 去水印' : '普通消除笔', `智能填充 · 画笔 ${Math.round(stroke.size)} px`);
+    } catch (error) {
+      setNotice({ type: 'error', text: error instanceof Error ? error.message : '消除处理失败' });
+    }
+  }
+
   async function applyWatermarkValue(options: WatermarkOptions) {
     if (!activeAsset || (options.kind === 'text' && !options.text.trim()) || (options.kind === 'image' && !options.image)) return;
     await replaceActive(await applyWatermark(activeAsset, options), '添加水印', options.kind === 'text' ? options.text : '图片水印');
@@ -764,6 +776,7 @@ function App() {
           onMattingApply={applyMatting}
           onMattingBrushApply={applyAiBrush}
           onAiApply={applyAi}
+          onCleanup={applyCleanup}
           onWatermark={applyWatermarkValue}
           onMetadata={applyMetadataValue}
           onClearMetadata={clearMetadataValue}
@@ -876,6 +889,7 @@ function Workspace({
   onMattingApply,
   onMattingBrushApply,
   onAiApply,
+  onCleanup,
   onWatermark,
   onMetadata,
   onClearMetadata,
@@ -909,6 +923,7 @@ function Workspace({
   onMattingApply: (request: LocalBackgroundRemovalOptions) => Promise<void>;
   onMattingBrushApply: (sourceAsset: ImageAsset, stroke: BackgroundBrushStroke) => Promise<void>;
   onAiApply: (request: AiRequest) => Promise<void>;
+  onCleanup: (stroke: CleanupBrushStroke) => Promise<void>;
   onWatermark: (options: WatermarkOptions) => Promise<void>;
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
@@ -930,13 +945,13 @@ function Workspace({
       <div className="workspace-layout">
         <aside className="tool-sidebar"><div className="sidebar-title"><PanelLeft size={15} /><span>工具</span></div><div className="sidebar-list">{tools.map((tool) => { const ToolIcon = tool.icon; return <button className={`sidebar-tool ${activeTool === tool.id ? 'is-active' : ''}`} key={tool.id} onClick={() => onSelectTool(tool.id)} title={tool.description}><ToolIcon size={17} /><span>{tool.label}</span>{activeTool === tool.id && <span className="active-bar" />}</button>; })}</div><div className="sidebar-bottom"><ShieldCheck size={16} /><small>本地模式<br />Local only</small></div></aside>
         <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 实时预览</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <PreviewImage asset={activeAsset} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeAsset && <button className="icon-button" title="删除当前图片" aria-label="删除当前图片" onClick={() => onDeleteAsset(activeAsset.id)}><Trash2 size={16} /></button>}</div></div></section>
-        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onIdPhotoPreview={onIdPhotoPreview} onIdPhotoBrush={onIdPhotoBrush} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
+        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onIdPhotoPreview={onIdPhotoPreview} onIdPhotoBrush={onIdPhotoBrush} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onCleanup={onCleanup} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
       </div>
     </main>
   );
 }
 
-function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, onIdPhotoBrush, onIdPhoto, onSplit, onMerge, onEncode, onEdit, onMattingApply, onMattingBrushApply, onAiApply, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, setNotice }: {
+function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, onIdPhotoBrush, onIdPhoto, onSplit, onMerge, onEncode, onEdit, onMattingApply, onMattingBrushApply, onAiApply, onCleanup, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, setNotice }: {
   tool: ToolId;
   asset: ImageAsset | null;
   assets: ImageAsset[];
@@ -952,6 +967,7 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, on
   onMattingApply: (request: LocalBackgroundRemovalOptions) => Promise<void>;
   onMattingBrushApply: (sourceAsset: ImageAsset, stroke: BackgroundBrushStroke) => Promise<void>;
   onAiApply: (request: AiRequest) => Promise<void>;
+  onCleanup: (stroke: CleanupBrushStroke) => Promise<void>;
   onWatermark: (options: WatermarkOptions) => Promise<void>;
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
@@ -967,13 +983,14 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, on
     case 'merge': return <MergePanel assets={assets} onApply={onMerge} setNotice={setNotice} />;
     case 'compress': return <EncodePanel mode="compress" asset={asset} onApply={onEncode} />;
     case 'convert': return <EncodePanel mode="convert" asset={asset} onApply={onEncode} />;
-    case 'matting': return <MattingPanel asset={asset} onApply={onMattingApply} onBrushApply={onMattingBrushApply} setNotice={setNotice} />;
+    case 'matting': return <MattingPanel asset={asset} onApply={onMattingApply} onBrushApply={onMattingBrushApply} onAiApply={onAiApply} setNotice={setNotice} />;
+    case 'cleanup': return <CleanupPanel asset={asset} onApply={onCleanup} />;
+    case 'ai-upscale': return <AiModelPanel task="upscale" asset={asset} onApply={onAiApply} setNotice={setNotice} />;
     case 'edit': return <EditPanel onApply={onEdit} />;
     case 'watermark': return <WatermarkPanel asset={asset} onApply={onWatermark} />;
     case 'metadata': return <MetadataPanel asset={asset} onApply={onMetadata} onClear={onClearMetadata} setNotice={setNotice} />;
     case 'batch': return <BatchPanel count={assets.length} onApply={onBatch} />;
     case 'gif': return <GifPanel count={assets.length} onApply={onExportGif} />;
-    case 'ai': return <AiPanel asset={asset} onApply={onAiApply} setNotice={setNotice} />;
     case 'id-photo': return <IdPhotoPanel asset={asset} onPreview={onIdPhotoPreview} onBrushApply={onIdPhotoBrush} onApply={onIdPhoto} />;
     default: return <EmptyPanel />;
   }
@@ -1137,7 +1154,16 @@ function rgbToHex(color: [number, number, number]) {
   return `#${color.map((value) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, '0')).join('')}`;
 }
 
-function MattingPanel({ asset, onApply, onBrushApply, setNotice }: { asset: ImageAsset; onApply: (request: LocalBackgroundRemovalOptions) => Promise<void>; onBrushApply: (sourceAsset: ImageAsset, stroke: BackgroundBrushStroke) => Promise<void>; setNotice: (notice: Notice) => void }) {
+function MattingPanel({ asset, onApply, onBrushApply, onAiApply, setNotice }: { asset: ImageAsset; onApply: (request: LocalBackgroundRemovalOptions) => Promise<void>; onBrushApply: (sourceAsset: ImageAsset, stroke: BackgroundBrushStroke) => Promise<void>; onAiApply: (request: AiRequest) => Promise<void>; setNotice: (notice: Notice) => void }) {
+  const [mode, setMode] = useState<'local' | 'ai'>('local');
+  return <>
+    <PanelIntro title="智能抠图" description="按图片类型选择本地颜色抠除或 AI 人像抠图，结果均在浏览器内生成。" />
+    <div className="control-section"><div className="section-label">抠图方式</div><div className="segmented-grid two"><button className={mode === 'local' ? 'is-selected' : ''} onClick={() => setMode('local')}>本地抠图</button><button className={mode === 'ai' ? 'is-selected' : ''} onClick={() => setMode('ai')}>AI 抠图</button></div></div>
+    {mode === 'local' ? <LocalMattingPanel asset={asset} onApply={onApply} onBrushApply={onBrushApply} setNotice={setNotice} /> : <AiModelPanel task="remove-background" asset={asset} onApply={onAiApply} setNotice={setNotice} compact />}
+  </>;
+}
+
+function LocalMattingPanel({ asset, onApply, onBrushApply, setNotice }: { asset: ImageAsset; onApply: (request: LocalBackgroundRemovalOptions) => Promise<void>; onBrushApply: (sourceAsset: ImageAsset, stroke: BackgroundBrushStroke) => Promise<void>; setNotice: (notice: Notice) => void }) {
   const [method, setMethod] = useState<'solid' | 'connected'>('solid');
   const [interaction, setInteraction] = useState<'brush' | 'sample'>('brush');
   const [brushMode, setBrushMode] = useState<BackgroundBrushStroke['mode']>('erase');
@@ -1226,7 +1252,7 @@ function MattingPanel({ asset, onApply, onBrushApply, setNotice }: { asset: Imag
   const options: LocalBackgroundRemovalOptions = { method, targetColor, seedX: seed.x, seedY: seed.y, tolerance, feather };
 
   return <>
-    <PanelIntro title="离线抠图" description="无需 AI 模型，在浏览器本地擦除纯色或联通背景，并用画笔微调边缘。" />
+    <div className="inline-info"><Eraser size={16} /><span>适合纯色背景，可取样后批量抠除并用画笔修边。</span></div>
     <div className="control-section"><div className="segmented-grid two"><button className={method === 'solid' ? 'is-selected' : ''} onClick={() => setMethod('solid')}>纯色批量抠除</button><button className={method === 'connected' ? 'is-selected' : ''} onClick={() => setMethod('connected')}>联通色块抠除</button></div></div>
     <div className="control-section brush-control-section"><div className="segmented-grid two"><button className={interaction === 'brush' ? 'is-selected' : ''} onClick={() => setInteraction('brush')}><Paintbrush size={13} /> 画笔</button><button className={interaction === 'sample' ? 'is-selected' : ''} onClick={() => setInteraction('sample')}><Pipette size={13} /> 取样</button></div><div className="segmented-grid two"><button className={brushMode === 'erase' ? 'is-selected' : ''} onClick={() => setBrushMode('erase')}>擦除背景</button><button className={brushMode === 'restore' ? 'is-selected' : ''} onClick={() => setBrushMode('restore')}>还原区域</button></div><div className="range-heading"><span>画笔大小</span><strong>{brushSize} px</strong></div><input className="range-input" type="range" min="4" max={maxBrushSize} value={Math.min(brushSize, maxBrushSize)} onChange={(event) => setBrushSize(Number(event.target.value))} /></div>
     <div className="control-section direct-tool-section"><div className={`direct-image-frame background-pick-frame ${interaction === 'brush' ? 'brush-interaction' : ''}`} ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={(event) => handlePointerUp(event, true)} onPointerCancel={(event) => handlePointerUp(event, false)}><img ref={imageRef} src={asset.url} alt={interaction === 'brush' ? '画笔编辑透明遮罩' : '点击取样抠图颜色'} />{interaction === 'brush' && strokePoints.length > 0 && <svg className="brush-mask-preview" viewBox={`0 0 ${asset.width} ${asset.height}`} preserveAspectRatio="none" aria-hidden="true">{strokePoints.length === 1 ? <circle cx={strokePoints[0].x * asset.width / 100} cy={strokePoints[0].y * asset.height / 100} r={brushSize / 2} fill={brushMode === 'erase' ? '#e78f49' : '#6f9fda'} opacity=".65" /> : <polyline points={brushPath} fill="none" stroke={brushMode === 'erase' ? '#e78f49' : '#6f9fda'} strokeWidth={brushSize} strokeLinecap="round" strokeLinejoin="round" opacity=".65" />}</svg>}{interaction === 'sample' && <span className="background-pick-marker" style={{ left: `${seed.x}%`, top: `${seed.y}%` }} />}</div><div className="direct-tool-caption"><span>{interaction === 'brush' ? '拖动绘制透明遮罩' : '点击图片取样颜色和起点'}</span><span>{interaction === 'brush' ? '松开后应用' : method === 'solid' ? '全图匹配' : '仅联通区域'}</span></div></div>
@@ -1237,8 +1263,82 @@ function MattingPanel({ asset, onApply, onBrushApply, setNotice }: { asset: Imag
   </>;
 }
 
-function AiPanel({ asset, onApply, setNotice }: { asset: ImageAsset; onApply: (request: AiRequest) => Promise<void>; setNotice: (notice: Notice) => void }) {
-  const [task, setTask] = useState<AiTask>('remove-background');
+function CleanupPanel({ asset, onApply }: { asset: ImageAsset; onApply: (stroke: CleanupBrushStroke) => Promise<void> }) {
+  const [mode, setMode] = useState<CleanupBrushStroke['mode']>('ai');
+  const [brushSize, setBrushSize] = useState(48);
+  const [strokePoints, setStrokePoints] = useState<Array<{ x: number; y: number }>>([]);
+  const [busy, setBusy] = useState(false);
+  const frameRef = useRef<HTMLDivElement>(null);
+  const paintingRef = useRef(false);
+  const strokePointsRef = useRef<Array<{ x: number; y: number }>>([]);
+
+  useEffect(() => {
+    strokePointsRef.current = [];
+    setStrokePoints([]);
+  }, [asset.id]);
+
+  function pointFromEvent(event: React.PointerEvent<HTMLDivElement>) {
+    const frame = frameRef.current;
+    if (!frame) return null;
+    const rect = frame.getBoundingClientRect();
+    return { x: Math.max(0, Math.min(100, (event.clientX - rect.left) / rect.width * 100)), y: Math.max(0, Math.min(100, (event.clientY - rect.top) / rect.height * 100)) };
+  }
+
+  function updateStroke(points: Array<{ x: number; y: number }>) {
+    strokePointsRef.current = points;
+    setStrokePoints(points);
+  }
+
+  function startStroke(event: React.PointerEvent<HTMLDivElement>) {
+    if (busy) return;
+    const point = pointFromEvent(event);
+    if (!point) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    paintingRef.current = true;
+    updateStroke([point]);
+  }
+
+  function moveStroke(event: React.PointerEvent<HTMLDivElement>) {
+    if (!paintingRef.current) return;
+    const point = pointFromEvent(event);
+    if (!point) return;
+    const previous = strokePointsRef.current.at(-1);
+    if (previous && Math.hypot(previous.x - point.x, previous.y - point.y) < 0.15) return;
+    updateStroke([...strokePointsRef.current, point]);
+  }
+
+  async function finishStroke(event: React.PointerEvent<HTMLDivElement>, apply: boolean) {
+    if (!paintingRef.current) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    paintingRef.current = false;
+    const points = strokePointsRef.current;
+    if (!apply || !points.length) {
+      updateStroke([]);
+      return;
+    }
+    setBusy(true);
+    try {
+      await onApply({ mode, size: brushSize, points });
+    } finally {
+      updateStroke([]);
+      setBusy(false);
+    }
+  }
+
+  const path = strokePoints.map((point) => `${point.x * asset.width / 100},${point.y * asset.height / 100}`).join(' ');
+  const previewColor = mode === 'ai' ? '#d4f66e' : '#e78f49';
+  const maxBrushSize = Math.max(80, Math.min(320, Math.round(Math.max(asset.width, asset.height) * 0.25)));
+  return <>
+    <PanelIntro title="对象消除" description="涂抹水印、文字或杂物，松开后使用周边画面填充选区。" />
+    <div className="control-section"><div className="section-label">处理方式</div><div className="segmented-grid two"><button className={mode === 'ai' ? 'is-selected' : ''} onClick={() => setMode('ai')}><WandSparkles size={13} /> AI 去水印</button><button className={mode === 'standard' ? 'is-selected' : ''} onClick={() => setMode('standard')}><Eraser size={13} /> 普通消除笔</button></div><div className="direct-tool-caption"><span>{mode === 'ai' ? '多方向纹理智能填充' : '轻量快速周边填充'}</span><span>全程本地</span></div></div>
+    <div className="control-section brush-control-section"><div className="range-heading"><span>画笔大小</span><strong>{brushSize} px</strong></div><input className="range-input" type="range" min="6" max={maxBrushSize} value={Math.min(brushSize, maxBrushSize)} onChange={(event) => setBrushSize(Number(event.target.value))} /></div>
+    <div className="control-section direct-tool-section"><div className={`direct-image-frame cleanup-interaction ${busy ? 'is-busy' : ''}`} ref={frameRef} style={{ aspectRatio: `${asset.width} / ${asset.height}` }} onPointerDown={startStroke} onPointerMove={moveStroke} onPointerUp={(event) => void finishStroke(event, true)} onPointerCancel={(event) => void finishStroke(event, false)}><img src={asset.url} alt="消除笔编辑预览" />{strokePoints.length > 0 && <svg className="brush-mask-preview" viewBox={`0 0 ${asset.width} ${asset.height}`} preserveAspectRatio="none" aria-hidden="true">{strokePoints.length === 1 ? <circle cx={strokePoints[0].x * asset.width / 100} cy={strokePoints[0].y * asset.height / 100} r={brushSize / 2} fill={previewColor} opacity=".68" /> : <polyline points={path} fill="none" stroke={previewColor} strokeWidth={brushSize} strokeLinecap="round" strokeLinejoin="round" opacity=".68" />}</svg>}{busy && <span className="cleanup-busy">正在填充选区...</span>}</div><div className="direct-tool-caption"><span>在目标上按住并涂抹</span><span>松开立即处理</span></div></div>
+    <div className="inline-info"><ShieldCheck size={16} /><span>{mode === 'ai' ? 'AI 模式会扩大采样范围，复杂背景可能需要分段涂抹。' : '普通模式适合小面积文字和纯色区域。'}</span></div>
+  </>;
+}
+
+function AiModelPanel({ task, asset, onApply, setNotice, compact = false }: { task: AiTask; asset: ImageAsset; onApply: (request: AiRequest) => Promise<void>; setNotice: (notice: Notice) => void; compact?: boolean }) {
   const [scale, setScale] = useState<2 | 4>(2);
   const [capability, setCapability] = useState<AiCapability | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1264,6 +1364,7 @@ function AiPanel({ asset, onApply, setNotice }: { asset: ImageAsset; onApply: (r
   }, [asset.id, asset.name, asset.url]);
 
   const selectedTask = aiTasks.find((item) => item.id === task) ?? aiTasks[0];
+  const SelectedTaskIcon = selectedTask.icon;
   const modelId = aiModelId(task, scale);
   const outputLabel = task === 'remove-background' ? '透明 PNG' : `${scale}x PNG`;
 
@@ -1294,9 +1395,9 @@ function AiPanel({ asset, onApply, setNotice }: { asset: ImageAsset; onApply: (r
 
   const isSameAsset = sourceUrl === asset.url;
   return <>
-    <PanelIntro title="AI 图片处理" description="MODNet 人物抠图与 ESPCN 超分，模型按需加载，图片始终留在浏览器。" />
+    {!compact && <PanelIntro title="AI 超分" description="使用 ESPCN 本地模型智能放大图片，增强像素密度并恢复边缘细节。" />}
     <div className="ai-model-note"><ShieldCheck size={15} /><span><strong>本地推理</strong><small>WebGPU 优先 · WASM 自动降级 · 无需上传原图</small></span></div>
-    <div className="control-section"><div className="section-label">选择模型</div><div className="ai-task-grid">{aiTasks.map((item) => { const TaskIcon = item.icon; return <button type="button" key={item.id} className={`ai-task-card ${task === item.id ? 'is-selected' : ''}`} onClick={() => setTask(item.id)}><TaskIcon size={17} /><span><strong>{item.label}</strong><small>{item.description}</small><em>{item.model.toUpperCase()} · ONNX</em></span>{task === item.id && <Check size={14} />}</button>; })}</div></div>
+    <div className="control-section"><div className="ai-task-card is-selected single"><SelectedTaskIcon size={17} /><span><strong>{selectedTask.label}</strong><small>{selectedTask.description}</small><em>{selectedTask.model.toUpperCase()} · ONNX</em></span><Check size={14} /></div></div>
     {task === 'upscale' && <div className="control-section"><div className="section-label">输出倍率</div><div className="segmented-grid two"><button type="button" className={scale === 2 ? 'is-selected' : ''} onClick={() => setScale(2)}>2x 标准</button><button type="button" className={scale === 4 ? 'is-selected' : ''} onClick={() => setScale(4)}>4x 高清</button></div></div>}
     <div className="ai-status"><div className={`ai-orb ${capability?.runtime === 'unavailable' ? 'is-muted' : ''}`}><WandSparkles size={20} /></div><div><strong>{capability ? capability.runtime === 'webgpu' ? 'WebGPU 已就绪' : capability.runtime === 'wasm' ? 'WASM 兼容模式' : '当前设备不支持' : '正在检测本机能力'}</strong><small>{capability?.runtime === 'webgpu' ? '首次使用下载模型，之后复用浏览器缓存' : capability?.runtime === 'wasm' ? '首次使用下载模型和运行时，之后复用浏览器缓存' : '按需加载本地模型，不上传原图'}</small></div><span className="ai-runtime-chip">{capability?.runtime === 'webgpu' ? 'GPU' : 'LOCAL'}</span></div>
     <div className="ai-compare"><div className="ai-compare-toolbar"><div><span className="section-label">前后对比</span><small>{sourceName} → {isSameAsset ? '等待处理' : asset.name}</small></div><div className="segmented-control"><button type="button" className={compareMode === 'before' ? 'is-selected' : ''} onClick={() => setCompareMode('before')}>原图</button><button type="button" className={compareMode === 'after' ? 'is-selected' : ''} onClick={() => setCompareMode('after')}>结果</button></div></div><div className="ai-compare-stage"><img src={compareMode === 'before' ? sourceUrl : asset.url} alt={compareMode === 'before' ? 'AI 处理前原图' : 'AI 处理后结果'} />{task === 'remove-background' && compareMode === 'after' && !isSameAsset && <span className="transparency-label">透明背景</span>}</div><div className="ai-compare-meta"><span>{compareMode === 'before' ? `${asset.originalWidth} × ${asset.originalHeight}` : `${asset.width} × ${asset.height}`}</span><span>{compareMode === 'before' ? '处理前' : isSameAsset ? '尚未运行' : outputLabel}</span></div></div>
