@@ -355,8 +355,8 @@ function workspaceMetrics(viewport: ViewportSize) {
   const paddingY = Math.round(Math.min(isMobile ? 18 : 28, Math.max(12, viewport.height * 0.025)));
   const pageMaxWidth = 1540;
   const areaWidth = Math.max(0, Math.min(viewport.width - paddingX * 2, pageMaxWidth - paddingX * 2));
-  const topbarHeight = isMobile ? 62 : 72;
-  const fixedRowsHeight = isMobile ? 58 + 67 + 18 : 65 + 75 + 18;
+  const topbarHeight = 48;
+  const fixedRowsHeight = 48 + 58 + 10;
   const areaHeight = Math.max(0, viewport.height - topbarHeight - paddingY * 2 - fixedRowsHeight);
   return { paddingX, paddingY, areaWidth, areaHeight };
 }
