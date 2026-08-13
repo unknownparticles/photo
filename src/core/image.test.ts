@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extensionFor, readJpegOrientation, replaceExtension, stripExtension, updateImageMetadata } from './image';
+import { alignedCropRect, extensionFor, readJpegOrientation, replaceExtension, stripExtension, updateImageMetadata } from './image';
 
 describe('图片文件名工具', () => {
   it('可以移除原始扩展名', () => {
@@ -39,5 +39,15 @@ describe('图片文件名工具', () => {
     const bytes = new Uint8Array(await result.arrayBuffer());
     expect(Array.from(bytes.slice(0, 4))).toEqual([0xff, 0xd8, 0xff, 0xe1]);
     expect(new TextDecoder().decode(bytes.slice(6, 10))).toBe('Exif');
+  });
+});
+
+describe('批量对齐裁剪', () => {
+  it('按右下角定位裁剪区域', () => {
+    expect(alignedCropRect(1200, 800, 400, 300, 'bottom-right')).toEqual({ x: 800, y: 500, width: 400, height: 300 });
+  });
+
+  it('目标超过原图时限制到原图并保持居中', () => {
+    expect(alignedCropRect(320, 240, 800, 100, 'center')).toEqual({ x: 0, y: 70, width: 320, height: 100 });
   });
 });

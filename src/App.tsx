@@ -56,12 +56,14 @@ import {
   asProcessedAsset,
   createAssetFromBlob,
   createCollage,
+  alignedCropRect,
   cropAsset,
   composeIdPhotoAsset,
   downloadBlob,
   encodeAsset,
   encodeGifFrames,
   estimateDominantColor,
+  estimateBackgroundSamples,
   exportImage,
   normalizeImageOrientation,
   readImageMetadata,
@@ -72,11 +74,19 @@ import {
   updateImageMetadata,
 } from './core/image';
 import { useAppStore } from './store';
-import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, BackgroundColorSample, CleanupBrushStroke, ExportFormat, IdPhotoClothingLayer, IdPhotoMattingPreview, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
+import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, BackgroundColorSample, BatchCropAlignment, BatchOptions, BatchProgress, CleanupBrushStroke, ExportFormat, IdPhotoClothingLayer, IdPhotoMattingPreview, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
 import { DirectCropPanel, DirectSplitPanel, IdPhotoPanel } from './components/DirectImageControls';
 import { EditorOverlayContext, useEditorOverlay } from './components/EditorOverlay';
 
 type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
+
+type EditValues = { brightness: number; contrast: number; saturation: number; blur: number };
+
+const defaultEditValues: EditValues = { brightness: 0, contrast: 0, saturation: 0, blur: 0 };
+
+function editPreviewFilter(values: EditValues) {
+  return `brightness(${100 + values.brightness}%) contrast(${100 + values.contrast}%) saturate(${100 + values.saturation}%) blur(${values.blur}px)`;
+}
 
 type ToolDefinition = {
   id: ToolId;
@@ -182,7 +192,7 @@ function clampPreviewOffset(offset: PreviewPoint, zoom: number, image: { width: 
   };
 }
 
-function PreviewImage({ asset, onOverlayHost }: { asset: ImageAsset; onOverlayHost: (host: HTMLDivElement | null) => void }) {
+function PreviewImage({ asset, editValues, onOverlayHost }: { asset: ImageAsset; editValues?: EditValues; onOverlayHost: (host: HTMLDivElement | null) => void }) {
   const stageRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const pointersRef = useRef(new Map<number, PreviewPoint>());
@@ -333,7 +343,7 @@ function PreviewImage({ asset, onOverlayHost }: { asset: ImageAsset; onOverlayHo
       onPointerCancel={handlePointerEnd}
     >
       <div className="preview-image-canvas" style={{ width: displaySize.width, height: displaySize.height, transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${zoom})` }}>
-        <img ref={imageRef} className="main-preview" src={asset.url} alt={asset.name} onLoad={handleImageLoad} />
+        <img ref={imageRef} className="main-preview" src={asset.url} alt={asset.name} onLoad={handleImageLoad} style={editValues ? { filter: editPreviewFilter(editValues) } : undefined} />
         <div ref={onOverlayHost} className="editor-overlay-host" />
       </div>
     </div>
@@ -399,6 +409,7 @@ function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const [batchProgress, setBatchProgress] = useState<BatchProgress>({ running: false, completed: 0, failed: 0, total: 0 });
   const {
     assets,
     activeAssetId,
@@ -584,7 +595,7 @@ function App() {
     await replaceActive(next, '生成证件照', `${Math.round(values.width)} × ${Math.round(values.height)} · ${mattingMode === 'ai' ? 'AI 抠图' : '本地抠图'}${clothingDetail} · ${background.toUpperCase()}`);
   }
 
-  async function applyEdit(values: { brightness: number; contrast: number; saturation: number; blur: number }) {
+  async function applyEdit(values: EditValues) {
     if (!activeAsset) return;
     await replaceActive(await applyAdjustments(activeAsset, values), '图片编辑', '色彩调整');
   }
@@ -741,20 +752,59 @@ function App() {
     setNotice({ type: 'success', text: 'GIF 已导出' });
   }
 
-  async function applyBatch(kind: 'resize' | 'webp') {
-    if (!assets.length) return;
+  async function applyBatch(options: BatchOptions) {
+    if (!assets.length || batchProgress.running) return;
     const nextAssets: ImageAsset[] = [];
-    for (const asset of assets) {
-      if (kind === 'resize') nextAssets.push(await resizeAsset(asset, Math.min(asset.width, 1920), Math.round((Math.min(asset.width, 1920) / asset.width) * asset.height), '批量'));
-      else {
-        const blob = await encodeAsset(asProcessedAsset(asset), { format: 'image/webp', quality: 0.85, background: '#ffffff', preserveTransparency: true, preserveMetadata: false });
-        nextAssets.push(await createAssetFromBlob(blob, `${fileNameWithoutExtension(asset.name)}.webp`));
+    let failed = 0;
+    setBatchProgress({ running: true, completed: 0, failed: 0, total: assets.length });
+    for (let index = 0; index < assets.length; index += 1) {
+      const asset = assets[index];
+      setBatchProgress({ running: true, completed: index, failed, total: assets.length, currentName: asset.name });
+      try {
+        let next: ImageAsset;
+        if (options.kind === 'matting') {
+          const samples = await estimateBackgroundSamples(asset, options.sampling);
+          next = await removeBackgroundAsset(asset, {
+            method: samples.method,
+            targetColor: samples.colors[0],
+            targetColors: samples.colors,
+            seedX: samples.seeds[0].x,
+            seedY: samples.seeds[0].y,
+            seeds: samples.seeds,
+            tolerance: options.tolerance,
+            feather: options.feather,
+          });
+        } else if (options.kind === 'crop') {
+          const rect = alignedCropRect(asset.width, asset.height, options.width, options.height, options.alignment);
+          next = await cropAsset(asset, rect.x, rect.y, rect.width, rect.height, '批量裁剪');
+        } else if (options.kind === 'upscale') {
+          try {
+            next = await aiAdapter.run(asset, { modelId: aiModelId('upscale', options.scale), scale: options.scale });
+          } catch {
+            next = await applyLocalAiFallback(asset, 'upscale', options.scale);
+          }
+        } else if (options.kind === 'rename') {
+          const extension = asset.name.match(/\.([^.]+)$/)?.[1] ?? asset.type.split('/')[1].replace('jpeg', 'jpg');
+          const sequence = String(options.start + index).padStart(options.digits, '0');
+          const name = `${options.template.replaceAll('{name}', fileNameWithoutExtension(asset.name)).replaceAll('{n}', sequence)}.${extension}`;
+          next = { ...asset, id: crypto.randomUUID(), name };
+        } else {
+          const blob = await encodeAsset(asProcessedAsset(asset), { format: options.format, quality: options.quality, background: '#ffffff', preserveTransparency: options.format !== 'image/jpeg', preserveMetadata: false });
+          next = await createAssetFromBlob(blob, `${fileNameWithoutExtension(asset.name)}.${options.format === 'image/jpeg' ? 'jpg' : 'webp'}`);
+        }
+        nextAssets.push(next);
+      } catch {
+        failed += 1;
+        nextAssets.push(asset);
       }
+      setBatchProgress({ running: true, completed: index + 1, failed, total: assets.length, currentName: asset.name });
     }
     checkpoint();
     replaceAssets(nextAssets);
-    addHistory({ name: `${assets.length} 张图片`, label: '批量处理', detail: kind === 'resize' ? '最长边 1920 px' : 'WebP 质量 85' });
-    setNotice({ type: 'success', text: `批量处理完成，共 ${nextAssets.length} 张` });
+    const labels: Record<BatchOptions['kind'], string> = { matting: '批量抠图', crop: '批量裁剪', upscale: '批量超分', rename: '批量改名', compress: '批量压缩' };
+    addHistory({ name: `${assets.length} 张图片`, label: labels[options.kind], detail: failed ? `${assets.length - failed} 成功 · ${failed} 失败` : '全部成功' });
+    setBatchProgress({ running: false, completed: assets.length, failed, total: assets.length });
+    setNotice({ type: failed ? 'warning' : 'success', text: failed ? `批量处理完成：${assets.length - failed} 张成功，${failed} 张保留原图` : `批量处理完成，共 ${nextAssets.length} 张` });
   }
 
   const pageClass = `app-shell ${theme === 'dark' ? 'theme-dark' : ''} ${assets.length ? 'has-workspace' : ''}`;
@@ -823,6 +873,7 @@ function App() {
           onClearMetadata={clearMetadataValue}
           onExportGif={exportGif}
           onBatch={applyBatch}
+          batchProgress={batchProgress}
           onDeleteAsset={deleteAsset}
           onUndo={() => { undo(); setNotice({ type: 'success', text: '已撤销上一步操作' }); }}
           onRedo={() => { redo(); setNotice({ type: 'success', text: '已重做上一步操作' }); }}
@@ -937,6 +988,7 @@ function Workspace({
   onClearMetadata,
   onExportGif,
   onBatch,
+  batchProgress,
   onDeleteAsset,
   onUndo,
   onRedo,
@@ -962,7 +1014,7 @@ function Workspace({
   onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
-  onEdit: (values: { brightness: number; contrast: number; saturation: number; blur: number }) => Promise<void>;
+  onEdit: (values: EditValues) => Promise<void>;
   onMattingApply: (request: LocalBackgroundRemovalOptions) => Promise<void>;
   onMattingBrushApply: (sourceAsset: ImageAsset, stroke: BackgroundBrushStroke) => Promise<void>;
   onAiApply: (request: AiRequest) => Promise<void>;
@@ -971,7 +1023,8 @@ function Workspace({
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
   onExportGif: () => Promise<void>;
-  onBatch: (kind: 'resize' | 'webp') => Promise<void>;
+  onBatch: (options: BatchOptions) => Promise<void>;
+  batchProgress: BatchProgress;
   onDeleteAsset: (id: string) => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -980,8 +1033,10 @@ function Workspace({
   setNotice: (notice: Notice) => void;
 }) {
   const [overlayHost, setOverlayHost] = useState<HTMLDivElement | null>(null);
+  const [editPreview, setEditPreview] = useState<EditValues>(defaultEditValues);
   const activeToolDefinition = tools.find((tool) => tool.id === activeTool) ?? tools[0];
   const Icon = activeToolDefinition.icon;
+  useEffect(() => setEditPreview(defaultEditValues), [activeAsset?.id, activeTool]);
   return (
     <EditorOverlayContext.Provider value={overlayHost}>
     <main className="workspace-page">
@@ -989,15 +1044,15 @@ function Workspace({
       <div className="asset-strip"><div className="asset-strip-label"><span className="eyebrow">WORKSPACE</span><strong>{assets.length} 张图片</strong></div><div className="asset-thumbs">{assets.map((asset, index) => <div className="asset-thumb-wrap" key={asset.id}><button className={`asset-thumb ${asset.id === activeAsset?.id ? 'is-active' : ''}`} aria-label={`选中 ${asset.name}`} aria-pressed={asset.id === activeAsset?.id} onClick={() => onSelectAsset(asset.id)}><img src={asset.url} alt={asset.name} /><span>{index + 1}</span></button><button className="asset-delete-button" title={`删除 ${asset.name}`} aria-label={`删除 ${asset.name}`} onClick={() => onDeleteAsset(asset.id)}><X size={11} /></button></div>)}<button className="add-thumb" title="添加图片" aria-label="添加图片" onClick={onAddFiles}><Plus size={17} /></button></div><div className="asset-total">总计 {formatBytes(assets.reduce((sum, asset) => sum + asset.size, 0))}</div></div>
       <div className="workspace-layout">
         <aside className="tool-sidebar"><div className="sidebar-title"><PanelLeft size={15} /><span>工具</span></div><div className="sidebar-list">{tools.map((tool) => { const ToolIcon = tool.icon; return <button className={`sidebar-tool ${activeTool === tool.id ? 'is-active' : ''}`} key={tool.id} onClick={() => onSelectTool(tool.id)} title={tool.description}><ToolIcon size={17} /><span>{tool.label}</span>{activeTool === tool.id && <span className="active-bar" />}</button>; })}</div><div className="sidebar-bottom"><ShieldCheck size={16} /><small>本地模式<br />Local only</small></div></aside>
-        <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 直接编辑</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <PreviewImage asset={activeAsset} onOverlayHost={setOverlayHost} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeAsset && <button className="icon-button" title="删除当前图片" aria-label="删除当前图片" onClick={() => onDeleteAsset(activeAsset.id)}><Trash2 size={16} /></button>}</div></div></section>
-        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onIdPhotoPreview={onIdPhotoPreview} onIdPhotoBrush={onIdPhotoBrush} onIdPhotoClothing={onIdPhotoClothing} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onCleanup={onCleanup} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
+        <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 直接编辑</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <PreviewImage asset={activeAsset} editValues={activeTool === 'edit' ? editPreview : undefined} onOverlayHost={setOverlayHost} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeAsset && <button className="icon-button" title="删除当前图片" aria-label="删除当前图片" onClick={() => onDeleteAsset(activeAsset.id)}><Trash2 size={16} /></button>}</div></div></section>
+        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onIdPhotoPreview={onIdPhotoPreview} onIdPhotoBrush={onIdPhotoBrush} onIdPhotoClothing={onIdPhotoClothing} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onEditPreview={setEditPreview} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onCleanup={onCleanup} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} batchProgress={batchProgress} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
       </div>
     </main>
     </EditorOverlayContext.Provider>
   );
 }
 
-function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, onIdPhotoBrush, onIdPhotoClothing, onIdPhoto, onSplit, onMerge, onEncode, onEdit, onMattingApply, onMattingBrushApply, onAiApply, onCleanup, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, setNotice }: {
+function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, onIdPhotoBrush, onIdPhotoClothing, onIdPhoto, onSplit, onMerge, onEncode, onEdit, onEditPreview, onMattingApply, onMattingBrushApply, onAiApply, onCleanup, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, batchProgress, setNotice }: {
   tool: ToolId;
   asset: ImageAsset | null;
   assets: ImageAsset[];
@@ -1010,7 +1065,8 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, on
   onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
-  onEdit: (values: { brightness: number; contrast: number; saturation: number; blur: number }) => Promise<void>;
+  onEdit: (values: EditValues) => Promise<void>;
+  onEditPreview: (values: EditValues) => void;
   onMattingApply: (request: LocalBackgroundRemovalOptions) => Promise<void>;
   onMattingBrushApply: (sourceAsset: ImageAsset, stroke: BackgroundBrushStroke) => Promise<void>;
   onAiApply: (request: AiRequest) => Promise<void>;
@@ -1019,7 +1075,8 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, on
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
   onExportGif: () => Promise<void>;
-  onBatch: (kind: 'resize' | 'webp') => Promise<void>;
+  onBatch: (options: BatchOptions) => Promise<void>;
+  batchProgress: BatchProgress;
   setNotice: (notice: Notice) => void;
 }) {
   if (!asset) return <EmptyPanel />;
@@ -1033,10 +1090,10 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, on
     case 'matting': return <MattingPanel asset={asset} onApply={onMattingApply} onBrushApply={onMattingBrushApply} onAiApply={onAiApply} setNotice={setNotice} />;
     case 'cleanup': return <CleanupPanel asset={asset} onApply={onCleanup} />;
     case 'ai-upscale': return <AiModelPanel task="upscale" asset={asset} onApply={onAiApply} setNotice={setNotice} />;
-    case 'edit': return <EditPanel onApply={onEdit} />;
+    case 'edit': return <EditPanel onApply={onEdit} onPreview={onEditPreview} />;
     case 'watermark': return <WatermarkPanel asset={asset} onApply={onWatermark} />;
     case 'metadata': return <MetadataPanel asset={asset} onApply={onMetadata} onClear={onClearMetadata} setNotice={setNotice} />;
-    case 'batch': return <BatchPanel count={assets.length} onApply={onBatch} />;
+    case 'batch': return <BatchPanel count={assets.length} progress={batchProgress} onApply={onBatch} />;
     case 'gif': return <GifPanel count={assets.length} onApply={onExportGif} />;
     case 'id-photo': return <IdPhotoPanel asset={asset} onPreview={onIdPhotoPreview} onBrushApply={onIdPhotoBrush} onLoadClothing={onIdPhotoClothing} onApply={onIdPhoto} />;
     default: return <EmptyPanel />;
@@ -1094,10 +1151,20 @@ function EncodePanel({ mode, asset, onApply }: { mode: 'compress' | 'convert'; a
   return <><PanelIntro title={mode === 'compress' ? '压缩图片' : '转换格式'} description={mode === 'compress' ? '在画质和文件体积之间找到合适的平衡。' : '选择输出格式，转换在本地完成。'} /><div className="compare-stats"><div><span>原始文件</span><strong>{formatBytes(asset.size)}</strong></div><ArrowRightLeft size={16} /><div><span>预计输出</span><strong>{formatBytes(estimated)}</strong></div><div className="saving"><span>预计节省</span><strong>{Math.max(1, Math.round((1 - estimated / asset.size) * 100))}%</strong></div></div><div className="control-section"><div className="section-label">输出格式</div><div className="format-pills">{formatOptions.map((option) => <button key={option.value} className={format === option.value ? 'is-selected' : ''} onClick={() => setFormat(option.value)}>{option.label}</button>)}</div></div><div className="control-section"><div className="range-heading"><span>质量</span><strong>{quality}</strong></div><input className="range-input" type="range" min="10" max="100" value={quality} onChange={(event) => setQuality(Number(event.target.value))} /><div className="range-labels"><span>更小体积</span><span>更高画质</span></div></div>{format === 'image/jpeg' && <div className="control-section"><div className="color-field"><span>透明区域背景</span><label><input type="color" value={background} onChange={(event) => setBackground(event.target.value)} /><b>{background.toUpperCase()}</b></label></div></div>}<ApplyButton onClick={() => void onApply(format, quality / 100, background)} label={mode === 'compress' ? '压缩并应用' : '转换并应用'} /></>;
 }
 
-function EditPanel({ onApply }: { onApply: (values: { brightness: number; contrast: number; saturation: number; blur: number }) => Promise<void> }) {
-  const [values, setValues] = useState({ brightness: 0, contrast: 0, saturation: 0, blur: 0 });
+function EditPanel({ onApply, onPreview }: { onApply: (values: EditValues) => Promise<void>; onPreview: (values: EditValues) => void }) {
+  const [values, setValues] = useState<EditValues>(defaultEditValues);
   const fields = [['brightness', '亮度', -100, 100], ['contrast', '对比度', -100, 100], ['saturation', '饱和度', -100, 100], ['blur', '模糊', 0, 12]] as const;
-  return <><PanelIntro title="图片编辑" description="做一点轻量调整，保持原图清晰和色彩自然。" /><div className="control-section adjustment-list">{fields.map(([key, label, min, max]) => <div className="adjustment-row" key={key}><div><span>{label}</span><strong>{values[key]}</strong></div><input className="range-input" type="range" min={min} max={max} value={values[key]} onChange={(event) => setValues({ ...values, [key]: Number(event.target.value) })} /></div>)}</div><div className="filter-row"><button>自然</button><button>黑白</button><button>胶片</button><button>暖色</button></div><ApplyButton onClick={() => void onApply(values)} label="应用调整" /></>;
+  function updateValue(key: keyof EditValues, value: number) {
+    const next = { ...values, [key]: value };
+    setValues(next);
+    onPreview(next);
+  }
+  async function apply() {
+    await onApply(values);
+    setValues(defaultEditValues);
+    onPreview(defaultEditValues);
+  }
+  return <><PanelIntro title="图片编辑" description="做一点轻量调整，保持原图清晰和色彩自然。" /><div className="control-section adjustment-list">{fields.map(([key, label, min, max]) => <div className="adjustment-row" key={key}><div><span>{label}</span><strong>{values[key]}</strong></div><input className="range-input" type="range" min={min} max={max} value={values[key]} onInput={(event) => updateValue(key, Number(event.currentTarget.value))} /></div>)}</div><div className="filter-row"><button>自然</button><button>黑白</button><button>胶片</button><button>暖色</button></div><ApplyButton onClick={() => void apply()} label="应用调整" /></>;
 }
 
 function WatermarkPanel({ asset, onApply }: { asset: ImageAsset; onApply: (options: WatermarkOptions) => Promise<void> }) {
@@ -1189,7 +1256,52 @@ function MetadataPanel({ asset, onApply, onClear, setNotice }: { asset: ImageAss
   return <><PanelIntro title="图片信息与元数据" description="查看照片信息，修改常见 EXIF 字段，或清除全部隐私数据。" /><div className="metadata-list">{rows.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div><div className="control-section metadata-editor"><div className="section-label">编辑照片信息 <span className="muted">JPEG / PNG</span></div>{metadataFields.map(([key, label]) => <Field key={key} label={label}><input value={values[key] ?? ''} placeholder={key === 'GPSLatitude' || key === 'GPSLongitude' ? '例如 31.2304' : '未填写'} onChange={(event) => setValues((current) => ({ ...current, [key]: event.target.value }))} /></Field>)}</div><div className="privacy-callout"><ShieldCheck size={17} /><span><strong>隐私建议</strong><small>清除操作会移除 EXIF、GPS 和编辑痕迹；修改操作只写入常见照片字段。</small></span></div><div className="metadata-actions"><button className="secondary-button full" onClick={() => { void onApply(values); setNotice({ type: 'success', text: '正在写入照片信息' }); }}><CheckCircle2 size={16} /> 保存修改</button><button className="secondary-button full danger-action" onClick={() => { void onClear(); setNotice({ type: 'success', text: '已清除照片元数据' }); }}><Trash2 size={16} /> 清除全部数据</button></div></>;
 }
 
-function BatchPanel({ count, onApply }: { count: number; onApply: (kind: 'resize' | 'webp') => Promise<void> }) { return <><PanelIntro title="批量处理" description="同一套规则处理当前工作区的所有图片。" /><div className="batch-summary"><strong>{count}</strong><span>张图片<br /><small>等待处理</small></span></div><div className="pipeline"><div className="pipeline-step is-done"><Check size={14} /> 导入</div><div className="pipeline-line" /><div className="pipeline-step"><Maximize2 size={14} /> 调整尺寸</div><div className="pipeline-line" /><div className="pipeline-step"><ArrowRightLeft size={14} /> 转换</div><div className="pipeline-line" /><div className="pipeline-step"><Download size={14} /> 导出</div></div><button className="action-row" onClick={() => void onApply('resize')}><span><Maximize2 size={17} /><strong>最长边调整至 1920 px</strong><small>保持原始比例</small></span><ArrowRightLeft size={16} /></button><button className="action-row" onClick={() => void onApply('webp')}><span><ArrowRightLeft size={17} /><strong>统一转换为 WebP</strong><small>质量 85 · 保留透明</small></span><ArrowRightLeft size={16} /></button></>;
+function BatchPanel({ count, progress, onApply }: { count: number; progress: BatchProgress; onApply: (options: BatchOptions) => Promise<void> }) {
+  const [kind, setKind] = useState<BatchOptions['kind']>('matting');
+  const [sampling, setSampling] = useState<'largest' | 'center' | 'corners'>('largest');
+  const [tolerance, setTolerance] = useState(24);
+  const [feather, setFeather] = useState(3);
+  const [cropWidth, setCropWidth] = useState(1080);
+  const [cropHeight, setCropHeight] = useState(1080);
+  const [alignment, setAlignment] = useState<BatchCropAlignment>('center');
+  const [scale, setScale] = useState<2 | 4>(2);
+  const [template, setTemplate] = useState('{name}-{n}');
+  const [start, setStart] = useState(1);
+  const [digits, setDigits] = useState(3);
+  const [format, setFormat] = useState<'image/jpeg' | 'image/webp'>('image/webp');
+  const [quality, setQuality] = useState(0.8);
+  const alignments: Array<{ id: BatchCropAlignment; label: string }> = [
+    { id: 'top-left', label: '左上' }, { id: 'top', label: '上' }, { id: 'top-right', label: '右上' },
+    { id: 'left', label: '左' }, { id: 'center', label: '中间' }, { id: 'right', label: '右' },
+    { id: 'bottom-left', label: '左下' }, { id: 'bottom', label: '下' }, { id: 'bottom-right', label: '右下' },
+  ];
+  const tabs: Array<{ id: BatchOptions['kind']; label: string }> = [
+    { id: 'matting', label: '抠图' }, { id: 'crop', label: '裁剪' }, { id: 'upscale', label: '超分' }, { id: 'rename', label: '改名' }, { id: 'compress', label: '压缩' },
+  ];
+
+  function options(): BatchOptions {
+    if (kind === 'matting') return { kind, sampling, tolerance, feather };
+    if (kind === 'crop') return { kind, width: cropWidth, height: cropHeight, alignment };
+    if (kind === 'upscale') return { kind, scale };
+    if (kind === 'rename') return { kind, template: template.trim() || '{name}-{n}', start, digits };
+    return { kind, format, quality };
+  }
+
+  const percentage = progress.total ? Math.round(progress.completed / progress.total * 100) : 0;
+  return <>
+    <PanelIntro title="批量处理" description="为当前工作区的全部图片应用同一套本地处理规则。" />
+    <div className="batch-summary"><strong>{count}</strong><span>张图片<br /><small>{progress.running ? `正在处理 ${progress.completed + 1}/${progress.total}` : progress.total ? `上次完成 ${progress.completed}/${progress.total}` : '等待处理'}</small></span></div>
+    <div className="batch-tabs">{tabs.map((tab) => <button type="button" key={tab.id} className={kind === tab.id ? 'is-selected' : ''} disabled={progress.running} onClick={() => setKind(tab.id)}>{tab.label}</button>)}</div>
+
+    {kind === 'matting' && <div className="control-section batch-options"><div className="section-label">自动取色区域</div><div className="segmented-grid three"><button className={sampling === 'largest' ? 'is-selected' : ''} onClick={() => setSampling('largest')}>最大色块</button><button className={sampling === 'center' ? 'is-selected' : ''} onClick={() => setSampling('center')}>中心色块</button><button className={sampling === 'corners' ? 'is-selected' : ''} onClick={() => setSampling('corners')}>四角色块</button></div><div className="field-grid"><Field label="容差"><input type="number" min="1" max="100" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} /></Field><Field label="羽化" suffix="px"><input type="number" min="0" max="30" value={feather} onChange={(event) => setFeather(Number(event.target.value))} /></Field></div></div>}
+    {kind === 'crop' && <div className="control-section batch-options"><div className="field-grid"><Field label="宽度" suffix="px"><input type="number" min="1" value={cropWidth} onChange={(event) => setCropWidth(Number(event.target.value))} /></Field><Field label="高度" suffix="px"><input type="number" min="1" value={cropHeight} onChange={(event) => setCropHeight(Number(event.target.value))} /></Field></div><div className="section-label">对齐方位</div><div className="batch-position-grid">{alignments.map((item) => <button type="button" key={item.id} title={item.label} aria-label={item.label} className={alignment === item.id ? 'is-selected' : ''} onClick={() => setAlignment(item.id)}><span /></button>)}</div></div>}
+    {kind === 'upscale' && <div className="control-section batch-options"><div className="section-label">输出倍率</div><div className="segmented-grid two"><button className={scale === 2 ? 'is-selected' : ''} onClick={() => setScale(2)}>2x 标准</button><button className={scale === 4 ? 'is-selected' : ''} onClick={() => setScale(4)}>4x 高清</button></div><div className="inline-info"><Sparkles size={16} /><span>优先使用 ESPCN 本地模型，模型不可用时自动使用浏览器高质量插值。</span></div></div>}
+    {kind === 'rename' && <div className="control-section batch-options"><Field label="文件名模板"><input type="text" value={template} onChange={(event) => setTemplate(event.target.value)} /></Field><div className="field-grid"><Field label="起始序号"><input type="number" min="0" value={start} onChange={(event) => setStart(Number(event.target.value))} /></Field><Field label="序号位数"><input type="number" min="1" max="8" value={digits} onChange={(event) => setDigits(Number(event.target.value))} /></Field></div><div className="batch-template-preview"><span>预览</span><strong>{(template || '{name}-{n}').replaceAll('{name}', '照片').replaceAll('{n}', String(start).padStart(digits, '0'))}.jpg</strong></div></div>}
+    {kind === 'compress' && <div className="control-section batch-options"><div className="section-label">输出格式</div><div className="segmented-grid two"><button className={format === 'image/webp' ? 'is-selected' : ''} onClick={() => setFormat('image/webp')}>WebP</button><button className={format === 'image/jpeg' ? 'is-selected' : ''} onClick={() => setFormat('image/jpeg')}>JPG</button></div><div className="range-heading"><span>输出质量</span><strong>{Math.round(quality * 100)}%</strong></div><input className="range-input" type="range" min="0.2" max="1" step="0.01" value={quality} onChange={(event) => setQuality(Number(event.target.value))} /></div>}
+
+    {progress.running && <div className="batch-progress"><div><span>{progress.currentName}</span><strong>{percentage}%</strong></div><div className="batch-progress-track"><span style={{ width: `${percentage}%` }} /></div>{progress.failed > 0 && <small>{progress.failed} 张处理失败，将保留原图</small>}</div>}
+    <button className="apply-button" disabled={progress.running || !count} onClick={() => void onApply(options())}>{progress.running ? <><Gauge size={17} /> 本地处理中…</> : <><Layers3 size={17} /> 开始批量处理<ArrowRightLeft size={15} /></>}</button>
+  </>;
 }
 
 function GifPanel({ count, onApply }: { count: number; onApply: () => Promise<void> }) { return <><PanelIntro title="GIF / 动图" description="用当前工作区的图片生成轻量动图。" /><div className="gif-timeline">{Array.from({ length: Math.min(count, 6) }, (_, index) => <span key={index}>{index + 1}</span>)}{count > 6 && <b>+{count - 6}</b>}</div><div className="control-section"><Field label="帧率" suffix="FPS"><input type="number" defaultValue="8" min="1" max="60" /></Field><Field label="循环"><select className="select-input"><option>无限循环</option><option>播放一次</option></select></Field></div><div className="inline-info"><Film size={16} /><span>浏览器支持 GIF 编码，输出将保留在本机</span></div><ApplyButton onClick={() => void onApply()} label="导出 GIF" /></>;

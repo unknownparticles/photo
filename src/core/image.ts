@@ -1,4 +1,4 @@
-import type { BackgroundBrushStroke, CleanupBrushStroke, ExportFormat, ExportOptions, IdPhotoClothingLayer, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, ProcessedAsset, SplitLine, WatermarkOptions } from '../types';
+import type { BackgroundBrushPoint, BackgroundBrushStroke, BatchCropAlignment, CleanupBrushStroke, ExportFormat, ExportOptions, IdPhotoClothingLayer, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, ProcessedAsset, SplitLine, WatermarkOptions } from '../types';
 
 const DEFAULT_MAX_EDGE = 8192;
 
@@ -242,6 +242,64 @@ export async function estimateDominantColor(asset: ImageAsset): Promise<[number,
   return dominant ? [Math.round(dominant.red / dominant.count), Math.round(dominant.green / dominant.count), Math.round(dominant.blue / dominant.count)] : [255, 255, 255];
 }
 
+function averageRegionColor(pixels: Uint8ClampedArray, width: number, height: number, centerX: number, centerY: number): [number, number, number] {
+  const radius = Math.max(1, Math.round(Math.min(width, height) * 0.025));
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  let count = 0;
+  for (let y = Math.max(0, centerY - radius); y <= Math.min(height - 1, centerY + radius); y += 1) {
+    for (let x = Math.max(0, centerX - radius); x <= Math.min(width - 1, centerX + radius); x += 1) {
+      const index = (y * width + x) * 4;
+      if (pixels[index + 3] < 24) continue;
+      red += pixels[index];
+      green += pixels[index + 1];
+      blue += pixels[index + 2];
+      count += 1;
+    }
+  }
+  return count ? [Math.round(red / count), Math.round(green / count), Math.round(blue / count)] : [255, 255, 255];
+}
+
+export async function estimateBackgroundSamples(asset: ImageAsset, sampling: 'largest' | 'center' | 'corners') {
+  if (sampling === 'largest') {
+    return { colors: [await estimateDominantColor(asset)], seeds: [{ x: 50, y: 50 }], method: 'solid' as const };
+  }
+  const image = await loadImage(asset.blob);
+  const scale = Math.min(1, 512 / Math.max(image.naturalWidth, image.naturalHeight));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('当前浏览器无法创建取色画布');
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  const points: BackgroundBrushPoint[] = sampling === 'center'
+    ? [{ x: 50, y: 50 }]
+    : [{ x: 1, y: 1 }, { x: 99, y: 1 }, { x: 1, y: 99 }, { x: 99, y: 99 }];
+  const colors = points.map((point) => averageRegionColor(
+    pixels,
+    canvas.width,
+    canvas.height,
+    Math.round(point.x / 100 * (canvas.width - 1)),
+    Math.round(point.y / 100 * (canvas.height - 1)),
+  ));
+  return { colors, seeds: points, method: 'connected' as const };
+}
+
+export function alignedCropRect(sourceWidth: number, sourceHeight: number, targetWidth: number, targetHeight: number, alignment: BatchCropAlignment) {
+  const width = Math.max(1, Math.min(sourceWidth, Math.round(targetWidth)));
+  const height = Math.max(1, Math.min(sourceHeight, Math.round(targetHeight)));
+  const horizontal = alignment.endsWith('left') || alignment === 'left' ? 0 : alignment.endsWith('right') || alignment === 'right' ? 1 : 0.5;
+  const vertical = alignment.startsWith('top') || alignment === 'top' ? 0 : alignment.startsWith('bottom') || alignment === 'bottom' ? 1 : 0.5;
+  return {
+    x: Math.round((sourceWidth - width) * horizontal),
+    y: Math.round((sourceHeight - height) * vertical),
+    width,
+    height,
+  };
+}
+
 export async function composeIdPhotoAsset(asset: ImageAsset, background: string, clothingLayers: IdPhotoClothingLayer[] = []) {
   const image = await loadImage(asset.blob);
   const canvas = document.createElement('canvas');
@@ -338,7 +396,7 @@ export async function applyAdjustments(asset: ImageAsset, values: { brightness: 
   if (!context) throw new Error('当前浏览器无法创建画布');
   const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
   const brightness = values.brightness / 100;
-  const contrast = (values.contrast + 100) / 100;
+  const contrast = values.contrast * 2.55;
   const saturation = (values.saturation + 100) / 100;
   const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
   for (let index = 0; index < pixels.data.length; index += 4) {

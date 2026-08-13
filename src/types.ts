@@ -133,6 +133,26 @@ export interface BatchJob {
   failed: number;
 }
 
+export type BatchCropAlignment =
+  | 'top-left' | 'top' | 'top-right'
+  | 'left' | 'center' | 'right'
+  | 'bottom-left' | 'bottom' | 'bottom-right';
+
+export type BatchOptions =
+  | { kind: 'matting'; sampling: 'largest' | 'center' | 'corners'; tolerance: number; feather: number }
+  | { kind: 'crop'; width: number; height: number; alignment: BatchCropAlignment }
+  | { kind: 'upscale'; scale: 2 | 4 }
+  | { kind: 'rename'; template: string; start: number; digits: number }
+  | { kind: 'compress'; format: 'image/jpeg' | 'image/webp'; quality: number };
+
+export interface BatchProgress {
+  running: boolean;
+  completed: number;
+  failed: number;
+  total: number;
+  currentName?: string;
+}
+
 export interface AiCapability {
   webgpu: boolean;
   wasm: boolean;
