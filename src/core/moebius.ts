@@ -9,7 +9,7 @@ const HALF_IDS = 10;
 const CACHE_NAME = 'alun-moebius-onnx-v1';
 const DEFAULT_MODEL_BASE = 'https://huggingface.co/simonw/Moebius-ONNX/resolve/main';
 
-type Ort = typeof import('onnxruntime-web');
+type Ort = typeof import('onnxruntime-web/webgpu');
 type Session = Awaited<ReturnType<Ort['InferenceSession']['create']>>;
 
 type Progress = (stage: string, loaded?: number, total?: number) => void;
@@ -76,7 +76,7 @@ async function loadModelBytes(url: string, onProgress?: (loaded: number, total: 
 
   if (cache) {
     try {
-      await cache.put(url, new Response(bytes.slice().buffer, {
+      await cache.put(url, new Response(bytes, {
         headers: {
           'content-type': 'application/octet-stream',
           'content-length': String(bytes.byteLength),
@@ -295,14 +295,13 @@ class MoebiusPipeline {
   }
 
   private async loadInternal(onProgress?: Progress) {
-    const ort = await import('onnxruntime-web');
+    const ort = await import('onnxruntime-web/webgpu');
     this.ort = ort;
-    const options = { executionProviders: ['webgpu'] as string[], graphOptimizationLevel: 'all' as const };
     const base = modelBaseUrl();
     const get = (file: string, label: string) => loadModelBytes(`${base}/${file}`, (loaded, total, cached) => onProgress?.(cached ? `${label} · 已缓存` : `下载 ${label}`, loaded, total));
-    this.encoder = await ort.InferenceSession.create(await get('vae_encoder.onnx', 'VAE Encoder'), options);
-    this.decoder = await ort.InferenceSession.create(await get('vae_decoder.onnx', 'VAE Decoder'), options);
-    this.unet = await ort.InferenceSession.create(await get('unet.onnx', 'Moebius UNet'), options);
+    this.encoder = await ort.InferenceSession.create(await get('vae_encoder.onnx', 'VAE Encoder'), { executionProviders: ['webgpu'], graphOptimizationLevel: 'all' });
+    this.decoder = await ort.InferenceSession.create(await get('vae_decoder.onnx', 'VAE Decoder'), { executionProviders: ['webgpu'], graphOptimizationLevel: 'all' });
+    this.unet = await ort.InferenceSession.create(await get('unet.onnx', 'Moebius UNet'), { executionProviders: ['webgpu'], graphOptimizationLevel: 'all' });
   }
 
   private async encode(chw: Float32Array) {
@@ -358,6 +357,7 @@ class MoebiusPipeline {
     options.onProgress?.('编码图片');
     const image = canvasToChw(imageCanvas);
     const mask = binaryMask(maskCanvas);
+    const mask64 = latentMask(mask);
     const maskedLatent = await this.encode(maskedChw(image, mask));
     const plane = LAT * LAT;
     let latent = randn(4 * plane, seed);
@@ -367,7 +367,7 @@ class MoebiusPipeline {
       const timestep = ddim.timesteps[index];
       const previous = index + 1 < ddim.timesteps.length ? ddim.timesteps[index + 1] : -1;
       options.onProgress?.(`局部重绘 ${index + 1}/${ddim.timesteps.length}`, index + 1, ddim.timesteps.length);
-      latent = ddimStep(await this.predict(latent, latentMask(mask), maskedLatent, timestep, guidance), latent, timestep, previous, ddim);
+      latent = ddimStep(await this.predict(latent, mask64, maskedLatent, timestep, guidance), latent, timestep, previous, ddim);
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     options.onProgress?.('解码结果');
