@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowRightLeft, Brush, Eraser, Info, Sparkles, WandSparkles } from 'lucide-react';
-import { runMoebiusInpaint } from '../core/moebius';
-import type { InpaintStroke } from '../core/moebius';
+import { ArrowRightLeft, Brush, Eraser, Gauge, Info, Sparkles, WandSparkles } from 'lucide-react';
+import { miganAdapter, runInpaint } from '../core/inpaint';
+import type { InpaintMode, InpaintStroke } from '../core/inpaint';
 import { useAppStore } from '../store';
 import './LocalInpaintBridge.css';
 
@@ -13,7 +13,14 @@ type Hosts = {
   overlay: HTMLElement | null;
 };
 
+type MiganStatus = {
+  installed: boolean;
+  runtime: 'webgpu' | 'wasm' | 'unavailable';
+  supported: boolean;
+};
+
 const emptyHosts: Hosts = { homeGrid: null, sidebar: null, controls: null, overlay: null };
+const emptyMiganStatus: MiganStatus = { installed: false, runtime: 'unavailable', supported: true };
 
 function sameHosts(first: Hosts, second: Hosts) {
   return first.homeGrid === second.homeGrid && first.sidebar === second.sidebar && first.controls === second.controls && first.overlay === second.overlay;
@@ -127,7 +134,9 @@ function MaskOverlay({ strokes, brushSize, imageWidth, imageHeight, onChange }: 
   </div>;
 }
 
-function InpaintPanel({ strokes, setStrokes, brushSize, setBrushSize, steps, setSteps, guidance, setGuidance, seed, setSeed, busy, status, progress, onRun }: {
+function InpaintPanel({ mode, onModeChange, strokes, setStrokes, brushSize, setBrushSize, steps, setSteps, guidance, setGuidance, seed, setSeed, busy, status, progress, miganStatus, onRun }: {
+  mode: InpaintMode;
+  onModeChange: (mode: InpaintMode) => void;
   strokes: InpaintStroke[];
   setStrokes: (strokes: InpaintStroke[]) => void;
   brushSize: number;
@@ -141,13 +150,25 @@ function InpaintPanel({ strokes, setStrokes, brushSize, setBrushSize, steps, set
   busy: boolean;
   status: string;
   progress: number | null;
+  miganStatus: MiganStatus;
   onRun: () => void;
 }) {
+  const smart = mode === 'smart';
+  const hq = mode === 'hq';
   return <div className="local-inpaint-panel">
     <div className="local-inpaint-intro">
-      <span className="local-inpaint-model"><Sparkles size={15} /> Moebius 0.22B</span>
+      <span className="local-inpaint-model">{smart ? <><Sparkles size={15} /> MI-GAN 512</> : <><WandSparkles size={15} /> Moebius 0.22B</>}</span>
       <h3>局部重绘</h3>
-      <p>在图片上涂抹需要替换的区域，模型会根据周围纹理与结构自动补全。全程在浏览器本地运行。</p>
+      <p>{smart ? '默认使用轻量 MI-GAN，根据周围纹理和结构快速补全涂抹区域。' : '使用 Moebius 0.22B 进行更重的扩散式补全，适合复杂或较大的缺失区域。'}</p>
+    </div>
+
+    <div className="local-inpaint-section">
+      <div className="local-inpaint-section-title"><span>处理模式</span><strong>{smart ? '推荐' : '高质量'}</strong></div>
+      <div className="local-inpaint-mode-grid">
+        <button type="button" disabled={busy} onClick={() => onModeChange('fast')}><Eraser size={16} /><strong>快速修复</strong><small>0 MB · 小污点/细线</small></button>
+        <button type="button" disabled={busy} className={smart ? 'is-selected' : ''} onClick={() => onModeChange('smart')}><Sparkles size={16} /><strong>智能重绘</strong><small>MI-GAN · 约 28 MB</small></button>
+        <button type="button" disabled={busy} className={hq ? 'is-selected' : ''} onClick={() => onModeChange('hq')}><WandSparkles size={16} /><strong>高质量</strong><small>Moebius · 约 1.24 GB</small></button>
+      </div>
     </div>
 
     <div className="local-inpaint-section">
@@ -159,21 +180,26 @@ function InpaintPanel({ strokes, setStrokes, brushSize, setBrushSize, steps, set
       </div>
     </div>
 
-    <div className="local-inpaint-section">
+    {hq && <div className="local-inpaint-section">
       <div className="local-inpaint-section-title"><span>推理步数</span><strong>{steps}</strong></div>
       <input type="range" min="12" max="28" step="1" value={steps} disabled={busy} onChange={(event) => setSteps(Number(event.target.value))} />
       <div className="local-inpaint-section-title"><span>引导强度</span><strong>{guidance.toFixed(1)}</strong></div>
       <input type="range" min="1" max="4" step="0.1" value={guidance} disabled={busy} onChange={(event) => setGuidance(Number(event.target.value))} />
       <label className="local-inpaint-seed"><span>随机种子</span><input type="number" value={seed} disabled={busy} onChange={(event) => setSeed(Number(event.target.value) || 1)} /></label>
-    </div>
+    </div>}
 
-    <div className="local-inpaint-note"><Info size={15} /><span>首次使用约需下载 1.24GB ONNX 权重，之后会优先从浏览器缓存读取。模型固定以 512×512 进行推理，再融合回原图尺寸。</span></div>
-    <div className="local-inpaint-note"><Info size={15} /><span>Moebius 使用学习到的条件嵌入，不使用文字提示词；重绘内容由原图上下文决定。</span></div>
+    {smart ? <>
+      <div className="local-inpaint-model-state"><Gauge size={15} /><span><strong>{miganStatus.installed ? 'MI-GAN 已缓存' : 'MI-GAN 按需下载'}</strong><small>{miganStatus.supported ? `${miganStatus.runtime === 'webgpu' ? 'WebGPU 优先' : 'WASM 模式'} · 模型约 28 MB` : '当前浏览器不支持本地 MI-GAN'}</small></span></div>
+      <div className="local-inpaint-note"><Info size={15} /><span>首次使用只下载 MI-GAN Pipeline v2；模型会缓存在浏览器中。它直接接收原图和二值蒙版，并自行完成裁剪、512 推理和融合。</span></div>
+    </> : <>
+      <div className="local-inpaint-note"><Info size={15} /><span>Moebius 首次使用约需下载 1.24 GB ONNX 权重，仅建议桌面端高性能浏览器按需安装。</span></div>
+      <div className="local-inpaint-note"><Info size={15} /><span>Moebius 不使用文字提示词；重绘内容由原图上下文决定。</span></div>
+    </>}
 
     {status && <div className="local-inpaint-status"><span>{status}</span>{progress !== null && <strong>{Math.round(progress * 100)}%</strong>}<div>{progress !== null && <i style={{ width: `${Math.max(2, progress * 100)}%` }} />}</div></div>}
 
-    <button className="local-inpaint-run" type="button" disabled={busy || !strokes.length} onClick={onRun}>
-      <WandSparkles size={17} /> {busy ? '正在局部重绘…' : '开始局部重绘'}
+    <button className="local-inpaint-run" type="button" disabled={busy || !strokes.length || (smart && !miganStatus.supported)} onClick={onRun}>
+      {smart ? <Sparkles size={17} /> : <WandSparkles size={17} />} {busy ? '正在局部重绘…' : smart ? '智能重绘' : '高质量重绘'}
     </button>
   </div>;
 }
@@ -181,6 +207,7 @@ function InpaintPanel({ strokes, setStrokes, brushSize, setBrushSize, steps, set
 export default function LocalInpaintBridge() {
   const [hosts, setHosts] = useState<Hosts>(emptyHosts);
   const [active, setActive] = useState(false);
+  const [mode, setMode] = useState<InpaintMode>('smart');
   const [strokes, setStrokes] = useState<InpaintStroke[]>([]);
   const [brushSize, setBrushSize] = useState(64);
   const [steps, setSteps] = useState(20);
@@ -189,6 +216,7 @@ export default function LocalInpaintBridge() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
   const [progress, setProgress] = useState<number | null>(null);
+  const [miganStatus, setMiganStatus] = useState<MiganStatus>(emptyMiganStatus);
   const assets = useAppStore((state) => state.assets);
   const activeAssetId = useAppStore((state) => state.activeAssetId);
   const asset = useMemo(() => assets.find((item) => item.id === activeAssetId) ?? null, [assets, activeAssetId]);
@@ -220,6 +248,11 @@ export default function LocalInpaintBridge() {
   }, [asset?.id]);
 
   useEffect(() => {
+    if (!active || mode !== 'smart') return;
+    void miganAdapter.capability().then((capability) => setMiganStatus({ installed: capability.installed, runtime: capability.runtime, supported: capability.supported }));
+  }, [active, mode]);
+
+  useEffect(() => {
     function handleNativeNavigation(event: MouseEvent) {
       const target = event.target instanceof Element ? event.target.closest('button') : null;
       if (!target) return;
@@ -240,16 +273,32 @@ export default function LocalInpaintBridge() {
 
   function activate() {
     clickNativeCleanup();
-    window.setTimeout(() => setActive(true), 0);
+    window.setTimeout(() => {
+      setMode('smart');
+      setActive(true);
+    }, 0);
+  }
+
+  function changeMode(next: InpaintMode) {
+    if (next === 'fast') {
+      setActive(false);
+      setStrokes([]);
+      clickNativeCleanup();
+      return;
+    }
+    setMode(next);
+    setStatus('');
+    setProgress(null);
   }
 
   async function run() {
-    if (!asset || busy) return;
+    if (!asset || busy || mode === 'fast') return;
+    const engine = mode === 'smart' ? 'migan' : 'moebius';
     setBusy(true);
-    setStatus('准备 Moebius 0.22B');
+    setStatus(mode === 'smart' ? '准备 MI-GAN' : '准备 Moebius 0.22B');
     setProgress(null);
     try {
-      const next = await runMoebiusInpaint(asset, strokes, {
+      const next = await runInpaint(engine, asset, strokes, {
         steps,
         guidance,
         seed,
@@ -262,12 +311,17 @@ export default function LocalInpaintBridge() {
       store.checkpoint();
       store.replaceAssets(store.assets.map((item) => item.id === asset.id ? next : item));
       store.setActiveAsset(next.id);
-      store.addOperation({ id: crypto.randomUUID(), type: 'local-inpaint', params: { model: 'Moebius-0.22B', steps, guidance, seed }, createdAt: Date.now() });
-      store.addHistory({ name: next.name, label: '局部重绘', detail: `Moebius 0.22B · ${steps} steps` });
+      const model = engine === 'migan' ? 'MI-GAN-512' : 'Moebius-0.22B';
+      store.addOperation({ id: crypto.randomUUID(), type: 'local-inpaint', params: { model, mode, ...(engine === 'moebius' ? { steps, guidance, seed } : {}) }, createdAt: Date.now() });
+      store.addHistory({ name: next.name, label: '局部重绘', detail: engine === 'migan' ? 'MI-GAN 512 · 智能重绘' : `Moebius 0.22B · ${steps} steps` });
       setStrokes([]);
       setStatus('局部重绘完成');
       setProgress(1);
       setSeed(Math.floor(Math.random() * 1_000_000) + 1);
+      if (engine === 'migan') {
+        const capability = await miganAdapter.capability();
+        setMiganStatus({ installed: capability.installed, runtime: capability.runtime, supported: capability.supported });
+      }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : '局部重绘失败');
       setProgress(null);
@@ -279,14 +333,14 @@ export default function LocalInpaintBridge() {
   const homeCard = hosts.homeGrid ? createPortal(
     <button className="tool-card accent-pink" type="button" data-local-inpaint onClick={activate}>
       <span className="tool-card-icon"><WandSparkles size={19} /></span>
-      <span className="tool-card-copy"><strong>局部重绘</strong><small>Moebius 0.22B 智能补全</small></span>
+      <span className="tool-card-copy"><strong>局部重绘</strong><small>MI-GAN 默认 · 高质量可选</small></span>
       <ArrowRightLeft className="tool-arrow" size={15} />
     </button>,
     hosts.homeGrid,
   ) : null;
 
   const sidebarButton = hosts.sidebar ? createPortal(
-    <button className={`sidebar-tool ${active ? 'is-active' : ''}`} type="button" data-local-inpaint onClick={activate} title="使用 Moebius 0.22B 进行局部重绘">
+    <button className={`sidebar-tool ${active ? 'is-active' : ''}`} type="button" data-local-inpaint onClick={activate} title="轻量智能重绘，支持可选高质量模式">
       <WandSparkles size={17} /><span>局部重绘</span>{active && <span className="active-bar" />}
     </button>,
     hosts.sidebar,
@@ -296,7 +350,7 @@ export default function LocalInpaintBridge() {
     {homeCard}
     {sidebarButton}
     {active && hosts.controls && createPortal(
-      <InpaintPanel strokes={strokes} setStrokes={setStrokes} brushSize={brushSize} setBrushSize={setBrushSize} steps={steps} setSteps={setSteps} guidance={guidance} setGuidance={setGuidance} seed={seed} setSeed={setSeed} busy={busy} status={status} progress={progress} onRun={() => void run()} />,
+      <InpaintPanel mode={mode} onModeChange={changeMode} strokes={strokes} setStrokes={setStrokes} brushSize={brushSize} setBrushSize={setBrushSize} steps={steps} setSteps={setSteps} guidance={guidance} setGuidance={setGuidance} seed={seed} setSeed={setSeed} busy={busy} status={status} progress={progress} miganStatus={miganStatus} onRun={() => void run()} />,
       hosts.controls,
     )}
     {active && asset && hosts.overlay && createPortal(
