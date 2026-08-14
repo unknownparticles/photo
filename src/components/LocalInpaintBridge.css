@@ -4,8 +4,13 @@
   z-index: 20;
   overflow: auto;
   padding: 22px;
-  background: var(--panel, #111318);
-  color: inherit;
+  background: #fff;
+  color: #161a18;
+}
+
+.app-shell.theme-dark .local-inpaint-panel {
+  background: #202522;
+  color: #f2f4ef;
 }
 
 .local-inpaint-intro h3 {
