@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowRightLeft, Brush, Eraser, Gauge, Info, Sparkles, WandSparkles } from 'lucide-react';
+import { ArrowRightLeft, Brush, Eraser, Gauge, Hand, Info, Sparkles, WandSparkles } from 'lucide-react';
 import { miganAdapter, runInpaint } from '../core/inpaint';
 import type { InpaintMode, InpaintStroke } from '../core/inpaint';
 import { useAppStore } from '../store';
@@ -19,9 +19,30 @@ type MiganStatus = {
   supported: boolean;
 };
 
+type BrushCursorState = {
+  x: number;
+  y: number;
+  diameter: number;
+  visible: boolean;
+};
+
+const repairPreferences = [
+  { id: 'general', label: '通用', description: '保持原蒙版', prompt: '' },
+  { id: 'remove', label: '移除对象', description: '扩大边缘，减少残影', prompt: '移除对象' },
+  { id: 'texture', label: '连续纹理', description: '天空 / 墙面 / 草地', prompt: '补背景连续纹理' },
+  { id: 'portrait', label: '人像细节', description: '收紧边缘，保护细节', prompt: '人像皮肤' },
+  { id: 'text', label: '文字 / 水印', description: '适度扩边清理标记', prompt: '文字水印' },
+] as const;
+
+type RepairPreferenceId = (typeof repairPreferences)[number]['id'];
+
 const emptyHosts: Hosts = { homeGrid: null, sidebar: null, controls: null, overlay: null };
 const emptyMiganStatus: MiganStatus = { installed: false, runtime: 'unavailable', supported: true };
-const promptPresets = ['移除路人', '补天空', '草地', '墙面', '修皮肤'];
+const emptyBrushCursor: BrushCursorState = { x: 0, y: 0, diameter: 0, visible: false };
+
+function repairPreferenceDefinition(id: RepairPreferenceId) {
+  return repairPreferences.find((item) => item.id === id) ?? repairPreferences[0];
+}
 
 function sameHosts(first: Hosts, second: Hosts) {
   return first.homeGrid === second.homeGrid && first.sidebar === second.sidebar && first.controls === second.controls && first.overlay === second.overlay;
@@ -43,15 +64,19 @@ function clickNativeCleanup() {
   cleanup?.click();
 }
 
-function MaskOverlay({ strokes, brushSize, imageWidth, imageHeight, onChange }: {
+function MaskOverlay({ strokes, brushSize, imageWidth, imageHeight, panMode, onChange }: {
   strokes: InpaintStroke[];
   brushSize: number;
   imageWidth: number;
   imageHeight: number;
+  panMode: boolean;
   onChange: (strokes: InpaintStroke[]) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawingRef = useRef(false);
+  const activePointerRef = useRef<number | null>(null);
+  const cursorClientRef = useRef<{ x: number; y: number } | null>(null);
+  const [cursor, setCursor] = useState<BrushCursorState>(emptyBrushCursor);
 
   function redraw() {
     const canvas = canvasRef.current;
@@ -89,14 +114,52 @@ function MaskOverlay({ strokes, brushSize, imageWidth, imageHeight, onChange }: 
     }
   }
 
+  function updateBrushCursor(clientX: number, clientY: number, visible = true) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    cursorClientRef.current = { x: clientX, y: clientY };
+    const rect = canvas.getBoundingClientRect();
+    const normalizedX = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+    const normalizedY = Math.max(0, Math.min(1, (clientY - rect.top) / Math.max(1, rect.height)));
+    const scale = Math.min(canvas.clientWidth / Math.max(1, imageWidth), canvas.clientHeight / Math.max(1, imageHeight));
+    setCursor({
+      x: normalizedX * canvas.clientWidth,
+      y: normalizedY * canvas.clientHeight,
+      diameter: Math.max(4, brushSize * scale),
+      visible,
+    });
+  }
+
   useEffect(() => {
     redraw();
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const observer = new ResizeObserver(redraw);
+    const observer = new ResizeObserver(() => {
+      redraw();
+      const last = cursorClientRef.current;
+      if (last) updateBrushCursor(last.x, last.y, cursor.visible);
+    });
     observer.observe(canvas);
     return () => observer.disconnect();
   }, [strokes, imageWidth, imageHeight]);
+
+  useEffect(() => {
+    const last = cursorClientRef.current;
+    if (last) updateBrushCursor(last.x, last.y, cursor.visible);
+  }, [brushSize, imageWidth, imageHeight]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const viewport = canvas?.closest<HTMLElement>('.preview-image-viewport');
+    viewport?.classList.toggle('local-inpaint-pan-mode', panMode);
+    if (panMode) {
+      drawingRef.current = false;
+      const pointerId = activePointerRef.current;
+      if (canvas && pointerId !== null && canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId);
+      activePointerRef.current = null;
+    }
+    return () => viewport?.classList.remove('local-inpaint-pan-mode');
+  }, [panMode]);
 
   function point(event: React.PointerEvent<HTMLCanvasElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -107,15 +170,19 @@ function MaskOverlay({ strokes, brushSize, imageWidth, imageHeight, onChange }: 
   }
 
   function start(event: React.PointerEvent<HTMLCanvasElement>) {
+    if (panMode) return;
     event.preventDefault();
     event.stopPropagation();
+    updateBrushCursor(event.clientX, event.clientY);
     event.currentTarget.setPointerCapture(event.pointerId);
+    activePointerRef.current = event.pointerId;
     drawingRef.current = true;
     onChange([...strokes, { size: brushSize, points: [point(event)] }]);
   }
 
   function move(event: React.PointerEvent<HTMLCanvasElement>) {
-    if (!drawingRef.current) return;
+    updateBrushCursor(event.clientX, event.clientY);
+    if (!drawingRef.current || panMode) return;
     event.preventDefault();
     event.stopPropagation();
     const next = point(event);
@@ -123,27 +190,62 @@ function MaskOverlay({ strokes, brushSize, imageWidth, imageHeight, onChange }: 
   }
 
   function end(event: React.PointerEvent<HTMLCanvasElement>) {
+    if (!drawingRef.current) return;
     event.preventDefault();
     event.stopPropagation();
     drawingRef.current = false;
+    activePointerRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   }
 
-  return <div className="local-inpaint-mask" onPointerDown={(event) => event.stopPropagation()}>
-    <canvas ref={canvasRef} onPointerDown={start} onPointerMove={move} onPointerUp={end} onPointerCancel={end} />
-    <div className="local-inpaint-mask-hint"><Brush size={13} /> 涂抹需要重绘的区域</div>
+  function forwardWheel(event: React.WheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const viewport = event.currentTarget.closest<HTMLElement>('.preview-image-viewport');
+    if (!viewport) return;
+    viewport.dispatchEvent(new WheelEvent('wheel', {
+      bubbles: true,
+      cancelable: true,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      deltaX: event.deltaX,
+      deltaY: event.deltaY,
+      deltaZ: event.deltaZ,
+      deltaMode: event.deltaMode,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey,
+      metaKey: event.metaKey,
+    }));
+  }
+
+  return <div className={`local-inpaint-mask ${panMode ? 'is-pan-mode' : ''}`} onPointerDown={(event) => event.stopPropagation()} onWheel={forwardWheel}>
+    <canvas
+      ref={canvasRef}
+      onPointerEnter={(event) => updateBrushCursor(event.clientX, event.clientY)}
+      onPointerLeave={() => !drawingRef.current && setCursor((current) => ({ ...current, visible: false }))}
+      onPointerDown={start}
+      onPointerMove={move}
+      onPointerUp={end}
+      onPointerCancel={end}
+    />
+    <div
+      className="local-inpaint-brush-cursor"
+      style={{ left: cursor.x, top: cursor.y, width: cursor.diameter, height: cursor.diameter, opacity: cursor.visible && !panMode ? 1 : 0 }}
+    />
+    <div className="local-inpaint-mask-hint">{panMode ? <><Hand size={13} /> 抓手：拖动画布，松开空格返回画笔</> : <><Brush size={13} /> 滚轮缩放 · 按住空格拖动画布</>}</div>
   </div>;
 }
 
-function InpaintPanel({ mode, onModeChange, strokes, setStrokes, brushSize, setBrushSize, prompt, setPrompt, steps, setSteps, guidance, setGuidance, seed, setSeed, busy, status, progress, miganStatus, onRun }: {
+function InpaintPanel({ mode, onModeChange, strokes, setStrokes, brushSize, setBrushSize, repairPreference, setRepairPreference, steps, setSteps, guidance, setGuidance, seed, setSeed, busy, status, progress, miganStatus, onRun }: {
   mode: InpaintMode;
   onModeChange: (mode: InpaintMode) => void;
   strokes: InpaintStroke[];
   setStrokes: (strokes: InpaintStroke[]) => void;
   brushSize: number;
   setBrushSize: (value: number) => void;
-  prompt: string;
-  setPrompt: (value: string) => void;
+  repairPreference: RepairPreferenceId;
+  setRepairPreference: (value: RepairPreferenceId) => void;
   steps: number;
   setSteps: (value: number) => void;
   guidance: number;
@@ -177,6 +279,7 @@ function InpaintPanel({ mode, onModeChange, strokes, setStrokes, brushSize, setB
     <div className="local-inpaint-section">
       <div className="local-inpaint-section-title"><span>蒙版画笔</span><strong>{brushSize}px</strong></div>
       <input type="range" min="8" max="256" step="4" value={brushSize} onChange={(event) => setBrushSize(Number(event.target.value))} />
+      <small className="local-inpaint-shortcut-help">画布上滚轮缩放 · 按住空格临时切换抓手</small>
       <div className="local-inpaint-actions">
         <button type="button" onClick={() => setStrokes(strokes.slice(0, -1))} disabled={!strokes.length || busy}><ArrowRightLeft size={14} /> 撤销一笔</button>
         <button type="button" onClick={() => setStrokes([])} disabled={!strokes.length || busy}><Eraser size={14} /> 清空蒙版</button>
@@ -184,10 +287,11 @@ function InpaintPanel({ mode, onModeChange, strokes, setStrokes, brushSize, setB
     </div>
 
     <div className="local-inpaint-section">
-      <div className="local-inpaint-section-title"><span>语义提示（可选）</span><strong>轻量</strong></div>
-      <input className="local-inpaint-prompt" type="text" maxLength={80} disabled={busy} value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="例如：移除路人、补天空、草地、墙面、修皮肤" />
-      <div className="local-inpaint-prompt-chips">{promptPresets.map((value) => <button type="button" key={value} disabled={busy} className={prompt === value ? 'is-selected' : ''} onClick={() => setPrompt(value)}>{value}</button>)}</div>
-      <small className="local-inpaint-prompt-help">提示词会调整蒙版扩展和修复策略；当前本地模型不是文本条件生成模型，因此不能保证按文字生成指定的新物体。</small>
+      <div className="local-inpaint-section-title"><span>修复偏好</span><strong>边缘策略</strong></div>
+      <div className="local-inpaint-repair-grid">
+        {repairPreferences.map((item) => <button type="button" key={item.id} disabled={busy} className={repairPreference === item.id ? 'is-selected' : ''} onClick={() => setRepairPreference(item.id)}><strong>{item.label}</strong><small>{item.description}</small></button>)}
+      </div>
+      <small className="local-inpaint-repair-help">这里只调整蒙版扩展和边缘处理。MI-GAN / 当前 Moebius 权重都不支持文本条件生成，不会按文字生成指定的新物体。</small>
     </div>
 
     {hq && <div className="local-inpaint-section">
@@ -200,10 +304,10 @@ function InpaintPanel({ mode, onModeChange, strokes, setStrokes, brushSize, setB
 
     {smart ? <>
       <div className="local-inpaint-model-state"><Gauge size={15} /><span><strong>{miganStatus.installed ? 'MI-GAN 已缓存' : 'MI-GAN 按需下载'}</strong><small>{miganStatus.supported ? `${miganStatus.runtime === 'webgpu' ? 'WebGPU 优先' : 'WASM 模式'} · 模型约 28 MB` : '当前浏览器不支持本地 MI-GAN'}</small></span></div>
-      <div className="local-inpaint-note"><Info size={15} /><span>首次使用只下载 MI-GAN Pipeline v2；模型会缓存在浏览器中。ONNX Runtime 的辅助模块和 WASM 现在从本站同源加载，避免第三方 CDN 模块加载失败。</span></div>
+      <div className="local-inpaint-note"><Info size={15} /><span>MI-GAN 根据原图上下文补全蒙版区域；“修复偏好”只改变边缘策略，不作为语义生成提示词。</span></div>
     </> : <>
       <div className="local-inpaint-note"><Info size={15} /><span>Moebius 首次使用约需下载 1.24 GB ONNX 权重，仅建议桌面端高性能浏览器按需安装。</span></div>
-      <div className="local-inpaint-note"><Info size={15} /><span>Moebius 本身没有文本条件接口；上方语义提示只用于轻量修复策略调整。</span></div>
+      <div className="local-inpaint-note"><Info size={15} /><span>Moebius 当前权重也没有文本条件接口；“修复偏好”只影响蒙版边缘策略。</span></div>
     </>}
 
     {status && <div className="local-inpaint-status"><span>{status}</span>{progress !== null && <strong>{Math.round(progress * 100)}%</strong>}<div>{progress !== null && <i style={{ width: `${Math.max(2, progress * 100)}%` }} />}</div></div>}
@@ -220,7 +324,8 @@ export default function LocalInpaintBridge() {
   const [mode, setMode] = useState<InpaintMode>('smart');
   const [strokes, setStrokes] = useState<InpaintStroke[]>([]);
   const [brushSize, setBrushSize] = useState(64);
-  const [prompt, setPrompt] = useState('');
+  const [repairPreference, setRepairPreference] = useState<RepairPreferenceId>('general');
+  const [panMode, setPanMode] = useState(false);
   const [steps, setSteps] = useState(20);
   const [guidance, setGuidance] = useState(2);
   const [seed, setSeed] = useState(() => Math.floor(Math.random() * 1_000_000) + 1);
@@ -254,10 +359,42 @@ export default function LocalInpaintBridge() {
 
   useEffect(() => {
     setStrokes([]);
-    setPrompt('');
+    setRepairPreference('general');
+    setPanMode(false);
     setStatus('');
     setProgress(null);
   }, [asset?.id]);
+
+  useEffect(() => {
+    if (!active) {
+      setPanMode(false);
+      return;
+    }
+    function isFormControl(target: EventTarget | null) {
+      return target instanceof Element && Boolean(target.closest('input, textarea, select, button, [contenteditable="true"]'));
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.code !== 'Space' || event.repeat || isFormControl(event.target)) return;
+      event.preventDefault();
+      setPanMode(true);
+    }
+    function handleKeyUp(event: KeyboardEvent) {
+      if (event.code !== 'Space') return;
+      if (panMode) event.preventDefault();
+      setPanMode(false);
+    }
+    function handleBlur() {
+      setPanMode(false);
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, [active, panMode]);
 
   useEffect(() => {
     if (!active || mode !== 'smart') return;
@@ -294,6 +431,7 @@ export default function LocalInpaintBridge() {
   function changeMode(next: InpaintMode) {
     if (next === 'fast') {
       setActive(false);
+      setPanMode(false);
       setStrokes([]);
       clickNativeCleanup();
       return;
@@ -306,7 +444,7 @@ export default function LocalInpaintBridge() {
   async function run() {
     if (!asset || busy || mode === 'fast') return;
     const engine = mode === 'smart' ? 'migan' : 'moebius';
-    const semanticPrompt = prompt.trim();
+    const repair = repairPreferenceDefinition(repairPreference);
     setBusy(true);
     setStatus(mode === 'smart' ? '准备 MI-GAN' : '准备 Moebius 0.22B');
     setProgress(null);
@@ -315,7 +453,7 @@ export default function LocalInpaintBridge() {
         steps,
         guidance,
         seed,
-        prompt: semanticPrompt || undefined,
+        prompt: repair.prompt || undefined,
         onProgress(stage, loaded, total) {
           setStatus(stage);
           setProgress(total && loaded !== undefined ? Math.min(1, loaded / total) : null);
@@ -326,9 +464,8 @@ export default function LocalInpaintBridge() {
       store.replaceAssets(store.assets.map((item) => item.id === asset.id ? next : item));
       store.setActiveAsset(next.id);
       const model = engine === 'migan' ? 'MI-GAN-512' : 'Moebius-0.22B';
-      store.addOperation({ id: crypto.randomUUID(), type: 'local-inpaint', params: { model, mode, ...(semanticPrompt ? { prompt: semanticPrompt } : {}), ...(engine === 'moebius' ? { steps, guidance, seed } : {}) }, createdAt: Date.now() });
-      const promptDetail = semanticPrompt ? ` · ${semanticPrompt.slice(0, 18)}` : '';
-      store.addHistory({ name: next.name, label: '局部重绘', detail: engine === 'migan' ? `MI-GAN 512 · 智能重绘${promptDetail}` : `Moebius 0.22B · ${steps} steps${promptDetail}` });
+      store.addOperation({ id: crypto.randomUUID(), type: 'local-inpaint', params: { model, mode, repairPreference, ...(engine === 'moebius' ? { steps, guidance, seed } : {}) }, createdAt: Date.now() });
+      store.addHistory({ name: next.name, label: '局部重绘', detail: engine === 'migan' ? `MI-GAN 512 · ${repair.label}` : `Moebius 0.22B · ${steps} steps · ${repair.label}` });
       setStrokes([]);
       setStatus('局部重绘完成');
       setProgress(1);
@@ -348,14 +485,14 @@ export default function LocalInpaintBridge() {
   const homeCard = hosts.homeGrid ? createPortal(
     <button className="tool-card accent-pink" type="button" data-local-inpaint onClick={activate}>
       <span className="tool-card-icon"><WandSparkles size={19} /></span>
-      <span className="tool-card-copy"><strong>局部重绘</strong><small>MI-GAN 默认 · 支持语义提示</small></span>
+      <span className="tool-card-copy"><strong>局部重绘</strong><small>MI-GAN 默认 · 修复偏好</small></span>
       <ArrowRightLeft className="tool-arrow" size={15} />
     </button>,
     hosts.homeGrid,
   ) : null;
 
   const sidebarButton = hosts.sidebar ? createPortal(
-    <button className={`sidebar-tool ${active ? 'is-active' : ''}`} type="button" data-local-inpaint onClick={activate} title="轻量智能重绘，支持语义提示和可选高质量模式">
+    <button className={`sidebar-tool ${active ? 'is-active' : ''}`} type="button" data-local-inpaint onClick={activate} title="轻量智能重绘，支持修复偏好和可选高质量模式">
       <WandSparkles size={17} /><span>局部重绘</span>{active && <span className="active-bar" />}
     </button>,
     hosts.sidebar,
@@ -365,11 +502,11 @@ export default function LocalInpaintBridge() {
     {homeCard}
     {sidebarButton}
     {active && hosts.controls && createPortal(
-      <InpaintPanel mode={mode} onModeChange={changeMode} strokes={strokes} setStrokes={setStrokes} brushSize={brushSize} setBrushSize={setBrushSize} prompt={prompt} setPrompt={setPrompt} steps={steps} setSteps={setSteps} guidance={guidance} setGuidance={setGuidance} seed={seed} setSeed={setSeed} busy={busy} status={status} progress={progress} miganStatus={miganStatus} onRun={() => void run()} />,
+      <InpaintPanel mode={mode} onModeChange={changeMode} strokes={strokes} setStrokes={setStrokes} brushSize={brushSize} setBrushSize={setBrushSize} repairPreference={repairPreference} setRepairPreference={setRepairPreference} steps={steps} setSteps={setSteps} guidance={guidance} setGuidance={setGuidance} seed={seed} setSeed={setSeed} busy={busy} status={status} progress={progress} miganStatus={miganStatus} onRun={() => void run()} />,
       hosts.controls,
     )}
     {active && asset && hosts.overlay && createPortal(
-      <MaskOverlay strokes={strokes} brushSize={brushSize} imageWidth={asset.width} imageHeight={asset.height} onChange={setStrokes} />,
+      <MaskOverlay strokes={strokes} brushSize={brushSize} imageWidth={asset.width} imageHeight={asset.height} panMode={panMode} onChange={setStrokes} />,
       hosts.overlay,
     )}
   </>;
