@@ -1,92 +1,22 @@
 import { canvasToBlob, createAssetFromBlob, loadImage } from './image';
 import type { ImageAsset } from '../types';
+import { loadCachedModel } from './inpaint/cache';
+import type { InpaintRunOptions, InpaintStroke } from './inpaint/types';
 
 const IMG = 512;
 const LAT = 64;
 const SCALING_FACTOR = 0.13025;
 const NOISE_OFFSET = 0.0357;
 const HALF_IDS = 10;
-const CACHE_NAME = 'alun-moebius-onnx-v1';
-const DEFAULT_MODEL_BASE = 'https://huggingface.co/simonw/Moebius-ONNX/resolve/main';
+const MOEBIUS_MODEL_REVISION = '5db03f2b707343428068eb987fe55c477b533574';
+const DEFAULT_MODEL_BASE = `https://huggingface.co/simonw/Moebius-ONNX/resolve/${MOEBIUS_MODEL_REVISION}`;
 
 type Ort = typeof import('onnxruntime-web/webgpu');
 type Session = Awaited<ReturnType<Ort['InferenceSession']['create']>>;
-
-type Progress = (stage: string, loaded?: number, total?: number) => void;
-
-export interface InpaintStrokePoint {
-  x: number;
-  y: number;
-}
-
-export interface InpaintStroke {
-  size: number;
-  points: InpaintStrokePoint[];
-}
-
-export interface MoebiusRunOptions {
-  steps?: number;
-  guidance?: number;
-  seed?: number;
-  onProgress?: Progress;
-}
+export type MoebiusRunOptions = InpaintRunOptions;
 
 function modelBaseUrl() {
   return (import.meta.env.VITE_MOEBIUS_MODEL_BASE_URL?.trim() || DEFAULT_MODEL_BASE).replace(/\/$/, '');
-}
-
-async function persistentCache() {
-  try {
-    if (navigator.storage?.persist) void navigator.storage.persist();
-    return await caches.open(CACHE_NAME);
-  } catch {
-    return null;
-  }
-}
-
-async function loadModelBytes(url: string, onProgress?: (loaded: number, total: number, cached: boolean) => void) {
-  const cache = await persistentCache();
-  const cached = await cache?.match(url);
-  if (cached) {
-    const bytes = new Uint8Array(await cached.arrayBuffer());
-    onProgress?.(bytes.byteLength, bytes.byteLength, true);
-    return bytes;
-  }
-
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Moebius 模型下载失败：HTTP ${response.status}`);
-  const total = Number(response.headers.get('content-length')) || 0;
-  const reader = response.body?.getReader();
-  let bytes: Uint8Array;
-
-  if (reader && total > 0) {
-    bytes = new Uint8Array(total);
-    let loaded = 0;
-    while (true) {
-      const part = await reader.read();
-      if (part.done) break;
-      bytes.set(part.value, loaded);
-      loaded += part.value.byteLength;
-      onProgress?.(loaded, total, false);
-    }
-  } else {
-    bytes = new Uint8Array(await response.arrayBuffer());
-    onProgress?.(bytes.byteLength, bytes.byteLength, false);
-  }
-
-  if (cache) {
-    try {
-      await cache.put(url, new Response(bytes, {
-        headers: {
-          'content-type': 'application/octet-stream',
-          'content-length': String(bytes.byteLength),
-        },
-      }));
-    } catch {
-      // Storage quotas and private mode can reject ~1.2 GB model caching.
-    }
-  }
-  return bytes;
 }
 
 function mulberry32(seed: number) {
@@ -220,14 +150,18 @@ function binaryMask(canvas: HTMLCanvasElement) {
 function maskedChw(image: Float32Array, mask: Float32Array) {
   const plane = IMG * IMG;
   const output = new Float32Array(image.length);
-  for (let channel = 0; channel < 3; channel += 1) for (let index = 0; index < plane; index += 1) output[channel * plane + index] = image[channel * plane + index] * (1 - mask[index]);
+  for (let channel = 0; channel < 3; channel += 1) {
+    for (let index = 0; index < plane; index += 1) output[channel * plane + index] = image[channel * plane + index] * (1 - mask[index]);
+  }
   return output;
 }
 
 function latentMask(mask: Float32Array) {
   const output = new Float32Array(LAT * LAT);
   const ratio = IMG / LAT;
-  for (let y = 0; y < LAT; y += 1) for (let x = 0; x < LAT; x += 1) output[y * LAT + x] = mask[y * ratio * IMG + x * ratio];
+  for (let y = 0; y < LAT; y += 1) {
+    for (let x = 0; x < LAT; x += 1) output[y * LAT + x] = mask[y * ratio * IMG + x * ratio];
+  }
   return output;
 }
 
@@ -286,7 +220,7 @@ class MoebiusPipeline {
   private unet: Session | null = null;
   private loading: Promise<void> | null = null;
 
-  async load(onProgress?: Progress) {
+  async load(onProgress?: InpaintRunOptions['onProgress']) {
     if (this.encoder && this.decoder && this.unet) return;
     if (this.loading) return this.loading;
     if (!('gpu' in navigator)) throw new Error('Moebius 0.22B 局部重绘需要支持 WebGPU 的浏览器');
@@ -294,11 +228,11 @@ class MoebiusPipeline {
     return this.loading;
   }
 
-  private async loadInternal(onProgress?: Progress) {
+  private async loadInternal(onProgress?: InpaintRunOptions['onProgress']) {
     const ort = await import('onnxruntime-web/webgpu');
     this.ort = ort;
     const base = modelBaseUrl();
-    const get = (file: string, label: string) => loadModelBytes(`${base}/${file}`, (loaded, total, cached) => onProgress?.(cached ? `${label} · 已缓存` : `下载 ${label}`, loaded, total));
+    const get = (file: string, label: string) => loadCachedModel(`${base}/${file}`, (loaded, total, cached) => onProgress?.(cached ? `${label} · 已缓存` : `下载 ${label}`, loaded, total));
     this.encoder = await ort.InferenceSession.create(await get('vae_encoder.onnx', 'VAE Encoder'), { executionProviders: ['webgpu'], graphOptimizationLevel: 'all' });
     this.decoder = await ort.InferenceSession.create(await get('vae_decoder.onnx', 'VAE Decoder'), { executionProviders: ['webgpu'], graphOptimizationLevel: 'all' });
     this.unet = await ort.InferenceSession.create(await get('unet.onnx', 'Moebius UNet'), { executionProviders: ['webgpu'], graphOptimizationLevel: 'all' });
@@ -348,7 +282,7 @@ class MoebiusPipeline {
     return result;
   }
 
-  async run(imageCanvas: HTMLCanvasElement, maskCanvas: HTMLCanvasElement, options: MoebiusRunOptions = {}) {
+  async run(imageCanvas: HTMLCanvasElement, mask: HTMLCanvasElement, options: MoebiusRunOptions = {}) {
     await this.load(options.onProgress);
     const steps = Math.max(8, Math.min(30, Math.round(options.steps ?? 20)));
     const guidance = Math.max(1, Math.min(5, options.guidance ?? 2));
@@ -356,13 +290,15 @@ class MoebiusPipeline {
     const ddim = makeDdim(steps);
     options.onProgress?.('编码图片');
     const image = canvasToChw(imageCanvas);
-    const mask = binaryMask(maskCanvas);
-    const mask64 = latentMask(mask);
-    const maskedLatent = await this.encode(maskedChw(image, mask));
+    const maskBinary = binaryMask(mask);
+    const mask64 = latentMask(maskBinary);
+    const maskedLatent = await this.encode(maskedChw(image, maskBinary));
     const plane = LAT * LAT;
     let latent = randn(4 * plane, seed);
     const offset = randn(4, seed ^ 0x9e3779b9);
-    for (let channel = 0; channel < 4; channel += 1) for (let index = 0; index < plane; index += 1) latent[channel * plane + index] += NOISE_OFFSET * offset[channel];
+    for (let channel = 0; channel < 4; channel += 1) {
+      for (let index = 0; index < plane; index += 1) latent[channel * plane + index] += NOISE_OFFSET * offset[channel];
+    }
     for (let index = 0; index < ddim.timesteps.length; index += 1) {
       const timestep = ddim.timesteps[index];
       const previous = index + 1 < ddim.timesteps.length ? ddim.timesteps[index + 1] : -1;
@@ -371,7 +307,7 @@ class MoebiusPipeline {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     options.onProgress?.('解码结果');
-    return blendResult(await this.decode(latent), imageCanvas, mask);
+    return blendResult(await this.decode(latent), imageCanvas, maskBinary);
   }
 }
 
@@ -396,5 +332,5 @@ export async function runMoebiusInpaint(asset: ImageAsset, strokes: InpaintStrok
   next.originalWidth = asset.originalWidth;
   next.originalHeight = asset.originalHeight;
   next.metadata = asset.metadata;
-  return next;
+  return { ...next, operationLabel: 'Moebius 高质量重绘' };
 }
