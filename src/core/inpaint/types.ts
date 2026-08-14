@@ -24,6 +24,7 @@ export interface InpaintRunOptions {
   steps?: number;
   guidance?: number;
   seed?: number;
+  prompt?: string;
   onProgress?: (stage: string, loaded?: number, total?: number) => void;
 }
 

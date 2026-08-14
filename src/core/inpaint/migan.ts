@@ -1,18 +1,25 @@
 import { canvasToBlob, createAssetFromBlob, loadImage } from '../image';
 import type { ImageAsset, ProcessedAsset } from '../../types';
 import { clearCachedModel, loadCachedModel, modelCacheInfo } from './cache';
+import { parseSemanticPrompt } from './semantic';
 import type { InpaintAdapter, InpaintCapability, InpaintRunOptions, InpaintStroke } from './types';
 
 const MIGAN_MODEL_BYTES = 28_079_181;
 const MIGAN_MODEL_REVISION = '1538c135034b8cfe7a8472f34d09c8a5a45b17a7';
 const DEFAULT_MIGAN_MODEL_URL = `https://huggingface.co/andraniksargsyan/migan/resolve/${MIGAN_MODEL_REVISION}/migan_pipeline_v2.onnx`;
-const DEFAULT_ORT_WASM_BASE_URL = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
 
 type Ort = typeof import('onnxruntime-web/webgpu');
 type Session = Awaited<ReturnType<Ort['InferenceSession']['create']>>;
 
 function modelUrl() {
   return import.meta.env.VITE_MIGAN_MODEL_URL?.trim() || DEFAULT_MIGAN_MODEL_URL;
+}
+
+function ortWasmBaseUrl() {
+  const override = import.meta.env.VITE_ORT_WASM_BASE_URL?.trim();
+  if (override) return override.endsWith('/') ? override : `${override}/`;
+  if (typeof window === 'undefined') return `${import.meta.env.BASE_URL}ort/`;
+  return new URL(`${import.meta.env.BASE_URL}ort/`, window.location.origin).href;
 }
 
 function imageToChw(pixels: Uint8ClampedArray, width: number, height: number) {
@@ -26,7 +33,7 @@ function imageToChw(pixels: Uint8ClampedArray, width: number, height: number) {
   return output;
 }
 
-function maskToChw(strokes: InpaintStroke[], width: number, height: number) {
+function maskToChw(strokes: InpaintStroke[], width: number, height: number, maskGrowPx = 0) {
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
@@ -41,7 +48,7 @@ function maskToChw(strokes: InpaintStroke[], width: number, height: number) {
 
   for (const stroke of strokes) {
     if (!stroke.points.length) continue;
-    context.lineWidth = Math.max(1, stroke.size);
+    context.lineWidth = Math.max(1, stroke.size + maskGrowPx * 2);
     const first = stroke.points[0];
     const x = first.x * width;
     const y = first.y * height;
@@ -116,7 +123,16 @@ class MiganAdapter implements InpaintAdapter {
     if (!capability.supported) throw new Error(capability.reason || '当前浏览器无法运行 MI-GAN');
     const ort = await import('onnxruntime-web/webgpu');
     this.ort = ort;
-    ort.env.wasm.wasmPaths = import.meta.env.VITE_ORT_WASM_BASE_URL?.trim() || DEFAULT_ORT_WASM_BASE_URL;
+
+    // Keep the WASM helper module and binary on the same origin as the app. Cross-origin
+    // dynamic module imports are commonly blocked by CSP, browser privacy settings or PWA
+    // deployments and surface as "no available backend found".
+    ort.env.wasm.wasmPaths = ortWasmBaseUrl();
+    ort.env.wasm.numThreads = typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated
+      ? Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 4))
+      : 1;
+    ort.env.wasm.proxy = false;
+
     const bytes = await loadCachedModel(modelUrl(), (loaded, total, cached) => {
       onProgress?.(cached ? 'MI-GAN 模型已缓存' : '下载 MI-GAN 模型', loaded, total || MIGAN_MODEL_BYTES);
     });
@@ -125,9 +141,15 @@ class MiganAdapter implements InpaintAdapter {
     try {
       this.session = await ort.InferenceSession.create(bytes, { executionProviders: [preferred], graphOptimizationLevel: 'all' });
     } catch (error) {
-      if (preferred !== 'webgpu' || typeof WebAssembly === 'undefined') throw error;
+      if (preferred !== 'webgpu' || typeof WebAssembly === 'undefined') {
+        throw new Error(`MI-GAN ${preferred.toUpperCase()} 后端初始化失败：${error instanceof Error ? error.message : String(error)}`);
+      }
       onProgress?.('WebGPU 初始化失败，切换 WASM');
-      this.session = await ort.InferenceSession.create(bytes, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+      try {
+        this.session = await ort.InferenceSession.create(bytes, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+      } catch (wasmError) {
+        throw new Error(`MI-GAN 本地运行时初始化失败：${wasmError instanceof Error ? wasmError.message : String(wasmError)}`);
+      }
     }
   }
 
@@ -142,6 +164,8 @@ class MiganAdapter implements InpaintAdapter {
     const ort = this.ort;
     if (!session || !ort) throw new Error('MI-GAN 尚未初始化');
 
+    const semantic = parseSemanticPrompt(options.prompt);
+    if (semantic.normalized) options.onProgress?.(`语义提示：${semantic.label}`);
     options.onProgress?.('准备 MI-GAN 输入');
     const source = await loadImage(asset.blob);
     const width = source.naturalWidth;
@@ -154,7 +178,7 @@ class MiganAdapter implements InpaintAdapter {
     context.drawImage(source, 0, 0, width, height);
     const original = context.getImageData(0, 0, width, height).data;
     const imageData = imageToChw(original, width, height);
-    const maskData = maskToChw(strokes, width, height);
+    const maskData = maskToChw(strokes, width, height, semantic.maskGrowPx);
 
     const imageName = session.inputNames.find((name) => name.toLowerCase().includes('image')) ?? session.inputNames[0];
     const maskName = session.inputNames.find((name) => name.toLowerCase().includes('mask')) ?? session.inputNames[1];
@@ -176,7 +200,7 @@ class MiganAdapter implements InpaintAdapter {
     next.originalHeight = asset.originalHeight;
     next.metadata = asset.metadata;
     options.onProgress?.('局部重绘完成', 1, 1);
-    return { ...next, operationLabel: 'MI-GAN 局部重绘' };
+    return { ...next, operationLabel: semantic.normalized ? `MI-GAN · ${semantic.label}` : 'MI-GAN 局部重绘' };
   }
 }
 
