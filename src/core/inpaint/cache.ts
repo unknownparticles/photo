@@ -42,39 +42,46 @@ export async function loadCachedModel(url: string, onProgress?: (loaded: number,
   if (!response.ok) throw new Error(`模型下载失败：HTTP ${response.status}`);
   const total = Number(response.headers.get('content-length')) || 0;
   const reader = response.body?.getReader();
-  const chunks: Uint8Array[] = [];
+  let bytes: Uint8Array;
   let loaded = 0;
 
-  if (reader) {
+  if (reader && total > 0) {
+    bytes = new Uint8Array(total);
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      bytes.set(part.value, loaded);
+      loaded += part.value.byteLength;
+      onProgress?.(loaded, total, false);
+    }
+    if (loaded !== total) bytes = bytes.slice(0, loaded);
+  } else if (reader) {
+    const chunks: Uint8Array[] = [];
     while (true) {
       const part = await reader.read();
       if (part.done) break;
       chunks.push(part.value);
       loaded += part.value.byteLength;
-      onProgress?.(loaded, total, false);
+      onProgress?.(loaded, 0, false);
+    }
+    bytes = new Uint8Array(loaded);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
     }
   } else {
-    const chunk = new Uint8Array(await response.arrayBuffer());
-    chunks.push(chunk);
-    loaded = chunk.byteLength;
+    bytes = new Uint8Array(await response.arrayBuffer());
+    loaded = bytes.byteLength;
     onProgress?.(loaded, total || loaded, false);
-  }
-
-  const bytes = new Uint8Array(loaded);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
   }
 
   if (cache) {
     try {
-      const copy = new Uint8Array(bytes.byteLength);
-      copy.set(bytes);
-      await cache.put(url, new Response(copy.buffer, {
+      await cache.put(url, new Response(bytes.buffer as ArrayBuffer, {
         headers: {
           'content-type': 'application/octet-stream',
-          'content-length': String(copy.byteLength),
+          'content-length': String(bytes.byteLength),
         },
       }));
     } catch {
