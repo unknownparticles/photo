@@ -15,6 +15,10 @@ type Hosts = {
 
 const emptyHosts: Hosts = { homeGrid: null, sidebar: null, controls: null, overlay: null };
 
+function sameHosts(first: Hosts, second: Hosts) {
+  return first.homeGrid === second.homeGrid && first.sidebar === second.sidebar && first.controls === second.controls && first.overlay === second.overlay;
+}
+
 function findHosts(): Hosts {
   const smartGroup = Array.from(document.querySelectorAll<HTMLElement>('.tool-group')).find((group) => group.querySelector('.group-label')?.textContent?.includes('智能工具'));
   return {
@@ -190,12 +194,20 @@ export default function LocalInpaintBridge() {
   const asset = useMemo(() => assets.find((item) => item.id === activeAssetId) ?? null, [assets, activeAssetId]);
 
   useEffect(() => {
-    const update = () => setHosts(findHosts());
+    let frame = 0;
+    const update = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const next = findHosts();
+        setHosts((current) => sameHosts(current, next) ? current : next);
+      });
+    };
     update();
     const observer = new MutationObserver(update);
     observer.observe(document.body, { childList: true, subtree: true });
     window.addEventListener('resize', update);
     return () => {
+      cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener('resize', update);
     };
