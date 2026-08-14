@@ -130,9 +130,60 @@
 
 .local-inpaint-actions button:disabled,
 .local-inpaint-run:disabled,
-.local-inpaint-mode-grid button:disabled {
+.local-inpaint-mode-grid button:disabled,
+.local-inpaint-prompt-chips button:disabled {
   opacity: .45;
   cursor: not-allowed;
+}
+
+.local-inpaint-prompt {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid rgba(127, 127, 127, .22);
+  border-radius: 9px;
+  padding: 10px 11px;
+  background: rgba(127, 127, 127, .06);
+  color: inherit;
+  outline: none;
+}
+
+.local-inpaint-prompt:focus {
+  border-color: rgba(255, 95, 139, .5);
+  box-shadow: 0 0 0 3px rgba(255, 95, 139, .08);
+}
+
+.local-inpaint-prompt-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.local-inpaint-prompt-chips button {
+  padding: 6px 8px;
+  border: 1px solid rgba(127, 127, 127, .18);
+  border-radius: 999px;
+  background: rgba(127, 127, 127, .055);
+  color: #69746c;
+  font-size: 10px;
+}
+
+.app-shell.theme-dark .local-inpaint-prompt-chips button {
+  color: #b9c2bc;
+}
+
+.local-inpaint-prompt-chips button.is-selected {
+  border-color: rgba(255, 95, 139, .4);
+  background: rgba(255, 95, 139, .09);
+  color: #e94f7d;
+}
+
+.local-inpaint-prompt-help {
+  display: block;
+  margin-top: 9px;
+  color: #89938c;
+  font-size: 10px;
+  line-height: 1.55;
 }
 
 .local-inpaint-seed {
