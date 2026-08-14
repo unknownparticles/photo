@@ -3,6 +3,8 @@ name: 部署到 GitHub Pages
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -11,7 +13,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -34,13 +36,16 @@ jobs:
       - name: 构建站点
         run: npm run build
       - name: 配置 Pages
+        if: github.event_name != 'pull_request'
         uses: actions/configure-pages@v5
       - name: 上传构建产物
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist
 
   deploy:
+    if: github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
