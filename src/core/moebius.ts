@@ -1,6 +1,7 @@
 import { canvasToBlob, createAssetFromBlob, loadImage } from './image';
 import type { ImageAsset } from '../types';
 import { loadCachedModel } from './inpaint/cache';
+import { parseSemanticPrompt } from './inpaint/semantic';
 import type { InpaintRunOptions, InpaintStroke } from './inpaint/types';
 
 const IMG = 512;
@@ -17,6 +18,13 @@ export type MoebiusRunOptions = InpaintRunOptions;
 
 function modelBaseUrl() {
   return (import.meta.env.VITE_MOEBIUS_MODEL_BASE_URL?.trim() || DEFAULT_MODEL_BASE).replace(/\/$/, '');
+}
+
+function ortWasmBaseUrl() {
+  const override = import.meta.env.VITE_ORT_WASM_BASE_URL?.trim();
+  if (override) return override.endsWith('/') ? override : `${override}/`;
+  if (typeof window === 'undefined') return `${import.meta.env.BASE_URL}ort/`;
+  return new URL(`${import.meta.env.BASE_URL}ort/`, window.location.origin).href;
 }
 
 function mulberry32(seed: number) {
@@ -99,7 +107,7 @@ function toSquareCanvas(source: CanvasImageSource, width: number, height: number
   return { canvas, rect: { x, y, w, h } };
 }
 
-function maskCanvas(strokes: InpaintStroke[], sourceWidth: number, sourceHeight: number, rect: { x: number; y: number; w: number; h: number }) {
+function maskCanvas(strokes: InpaintStroke[], sourceWidth: number, sourceHeight: number, rect: { x: number; y: number; w: number; h: number }, maskGrowPx = 0) {
   const canvas = document.createElement('canvas');
   canvas.width = IMG;
   canvas.height = IMG;
@@ -113,7 +121,7 @@ function maskCanvas(strokes: InpaintStroke[], sourceWidth: number, sourceHeight:
 
   for (const stroke of strokes) {
     if (!stroke.points.length) continue;
-    context.lineWidth = Math.max(2, stroke.size * scale);
+    context.lineWidth = Math.max(2, (stroke.size + maskGrowPx * 2) * scale);
     const first = stroke.points[0];
     context.beginPath();
     context.moveTo(rect.x + first.x * rect.w, rect.y + first.y * rect.h);
@@ -231,6 +239,11 @@ class MoebiusPipeline {
   private async loadInternal(onProgress?: InpaintRunOptions['onProgress']) {
     const ort = await import('onnxruntime-web/webgpu');
     this.ort = ort;
+    ort.env.wasm.wasmPaths = ortWasmBaseUrl();
+    ort.env.wasm.numThreads = typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated
+      ? Math.max(1, Math.min(navigator.hardwareConcurrency || 4, 4))
+      : 1;
+    ort.env.wasm.proxy = false;
     const base = modelBaseUrl();
     const get = (file: string, label: string) => loadCachedModel(`${base}/${file}`, (loaded, total, cached) => onProgress?.(cached ? `${label} · 已缓存` : `下载 ${label}`, loaded, total));
     this.encoder = await ort.InferenceSession.create(await get('vae_encoder.onnx', 'VAE Encoder'), { executionProviders: ['webgpu'], graphOptimizationLevel: 'all' });
@@ -315,9 +328,11 @@ const pipeline = new MoebiusPipeline();
 
 export async function runMoebiusInpaint(asset: ImageAsset, strokes: InpaintStroke[], options: MoebiusRunOptions = {}) {
   if (!strokes.some((stroke) => stroke.points.length)) throw new Error('请先在图片上涂抹需要重绘的区域');
+  const semantic = parseSemanticPrompt(options.prompt);
+  if (semantic.normalized) options.onProgress?.(`语义提示：${semantic.label}`);
   const image = await loadImage(asset.blob);
   const fitted = toSquareCanvas(image, image.naturalWidth, image.naturalHeight);
-  const mask = maskCanvas(strokes, image.naturalWidth, image.naturalHeight, fitted.rect);
+  const mask = maskCanvas(strokes, image.naturalWidth, image.naturalHeight, fitted.rect, semantic.maskGrowPx);
   const result = await pipeline.run(fitted.canvas, mask, options);
   const output = document.createElement('canvas');
   output.width = image.naturalWidth;
@@ -332,5 +347,5 @@ export async function runMoebiusInpaint(asset: ImageAsset, strokes: InpaintStrok
   next.originalWidth = asset.originalWidth;
   next.originalHeight = asset.originalHeight;
   next.metadata = asset.metadata;
-  return { ...next, operationLabel: 'Moebius 高质量重绘' };
+  return { ...next, operationLabel: semantic.normalized ? `Moebius · ${semantic.label}` : 'Moebius 高质量重绘' };
 }
