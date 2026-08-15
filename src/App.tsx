@@ -77,6 +77,7 @@ import { useAppStore } from './store';
 import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, BackgroundColorSample, BatchCropAlignment, BatchOptions, BatchProgress, CleanupBrushStroke, ExportFormat, IdPhotoClothingLayer, IdPhotoMattingPreview, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
 import { DirectCropPanel, DirectSplitPanel, IdPhotoPanel } from './components/DirectImageControls';
 import { EditorOverlayContext, useEditorOverlay } from './components/EditorOverlay';
+import { getBrowserLocale, observeDocumentLocale } from './i18n';
 
 type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
 
@@ -442,6 +443,8 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => observeDocumentLocale(getBrowserLocale()), []);
 
   useEffect(() => {
     const handlePaste = async (event: ClipboardEvent) => {
