@@ -1,0 +1,15 @@
+{
+  "name": "Alun Image · 本地图片工具箱",
+  "short_name": "Alun Image",
+  "description": "隐私优先的本地图片处理工具箱",
+  "start_url": "/photo/",
+  "display": "standalone",
+  "background_color": "#f7f8f5",
+  "theme_color": "#f7f8f5",
+  "lang": "zh-CN",
+  "scope": "/photo/",
+  "icons": [
+    { "src": "/photo/pwa-192.svg", "sizes": "192x192", "type": "image/svg+xml" },
+    { "src": "/photo/pwa-512.svg", "sizes": "512x512", "type": "image/svg+xml" }
+  ]
+}
