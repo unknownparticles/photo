@@ -54,7 +54,7 @@ export default defineConfig({
       manifest: {
         name: 'Alun Image',
         short_name: 'Alun Image',
-        description: '隐私优先的本地图片处理工具箱',
+        description: 'Privacy-first local image toolkit',
         theme_color: '#f7f8f5',
         background_color: '#f7f8f5',
         display: 'standalone',
