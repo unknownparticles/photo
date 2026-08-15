@@ -1,4 +1,12 @@
 export type AppLocale = 'zh' | 'en';
+export type LanguagePreference = 'auto' | AppLocale;
+
+const languagePreferenceStorageKey = 'alun-image-language-preference';
+
+const originalTextByNode = new WeakMap<Text, string>();
+const lastLocalizedTextByNode = new WeakMap<Text, string>();
+const originalAttributeByElement = new WeakMap<Element, Map<string, string>>();
+const lastLocalizedAttributeByElement = new WeakMap<Element, Map<string, string>>();
 
 const translations: Record<string, string> = {
   'Alun Image · 本地图片工具箱': 'Alun Image · Local Image Toolkit',
@@ -133,6 +141,9 @@ const translations: Record<string, string> = {
   '查看处理历史': 'View processing history',
   '切换主题': 'Toggle theme',
   '设置': 'Settings',
+  '语言': 'Language',
+  '跟随浏览器': 'Follow browser',
+  '中文': 'Chinese',
   '打开菜单': 'Open menu',
   '关闭面板': 'Close panel',
   '删除当前图片': 'Delete current image',
@@ -536,14 +547,41 @@ export function getBrowserLocale(): AppLocale {
   return language.toLowerCase().startsWith('zh') ? 'zh' : 'en';
 }
 
+export function getStoredLanguagePreference(): LanguagePreference {
+  if (typeof window === 'undefined') return 'auto';
+  try {
+    const stored = window.localStorage.getItem(languagePreferenceStorageKey);
+    return stored === 'zh' || stored === 'en' || stored === 'auto' ? stored : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+export function setStoredLanguagePreference(preference: LanguagePreference) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(languagePreferenceStorageKey, preference);
+  } catch {
+    // Storage may be unavailable in private or restricted browsing contexts.
+  }
+}
+
+export function resolveLocale(preference: LanguagePreference): AppLocale {
+  return preference === 'auto' ? getBrowserLocale() : preference;
+}
+
 export function translateText(value: string, locale: AppLocale) {
   if (locale === 'zh' || !value.trim()) return value;
-  const exact = translations[value];
-  if (exact) return exact;
+  const leadingWhitespace = value.match(/^\s*/)?.[0] ?? '';
+  const trailingWhitespace = value.match(/\s*$/)?.[0] ?? '';
+  const content = value.slice(leadingWhitespace.length, value.length - trailingWhitespace.length || undefined);
+  const exact = translations[content];
+  if (exact) return `${leadingWhitespace}${exact}${trailingWhitespace}`;
   for (const [pattern, replacement] of dynamicTranslations) {
-    if (pattern.test(value)) {
-      const translated = value.replace(pattern, replacement);
-      return Object.entries(translations).sort(([first], [second]) => second.length - first.length).reduce((result, [source, target]) => result.replaceAll(source, target), translated);
+    if (pattern.test(content)) {
+      const translated = content.replace(pattern, replacement);
+      const localized = Object.entries(translations).sort(([first], [second]) => second.length - first.length).reduce((result, [source, target]) => result.replaceAll(source, target), translated);
+      return `${leadingWhitespace}${localized}${trailingWhitespace}`;
     }
   }
   return value;
@@ -554,7 +592,6 @@ function shouldSkip(element: Element) {
 }
 
 export function localizeDocument(root: ParentNode, locale: AppLocale) {
-  if (locale === 'zh') return;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const textNodes: Text[] = [];
   let current: Node | null;
@@ -562,16 +599,35 @@ export function localizeDocument(root: ParentNode, locale: AppLocale) {
     if (current.parentElement && !shouldSkip(current.parentElement)) textNodes.push(current as Text);
   }
   textNodes.forEach((node) => {
-    const translated = translateText(node.nodeValue ?? '', locale);
+    const current = node.nodeValue ?? '';
+    const lastLocalized = lastLocalizedTextByNode.get(node);
+    if (!originalTextByNode.has(node) || (lastLocalized !== undefined && current !== lastLocalized)) originalTextByNode.set(node, current);
+    const original = originalTextByNode.get(node) ?? '';
+    const translated = locale === 'zh' ? original : translateText(original, locale);
     if (translated !== node.nodeValue) node.nodeValue = translated;
+    lastLocalizedTextByNode.set(node, translated);
   });
   root.querySelectorAll?.('[title], [aria-label], [placeholder], [alt]').forEach((element) => {
     if (shouldSkip(element)) return;
+    let originalAttributes = originalAttributeByElement.get(element);
+    if (!originalAttributes) {
+      originalAttributes = new Map<string, string>();
+      originalAttributeByElement.set(element, originalAttributes);
+    }
+    let lastLocalizedAttributes = lastLocalizedAttributeByElement.get(element);
+    if (!lastLocalizedAttributes) {
+      lastLocalizedAttributes = new Map<string, string>();
+      lastLocalizedAttributeByElement.set(element, lastLocalizedAttributes);
+    }
     ['title', 'aria-label', 'placeholder', 'alt'].forEach((attribute) => {
       const value = element.getAttribute(attribute);
       if (!value) return;
-      const translated = translateText(value, locale);
+      const lastLocalized = lastLocalizedAttributes?.get(attribute);
+      if (!originalAttributes?.has(attribute) || (lastLocalized !== undefined && value !== lastLocalized)) originalAttributes?.set(attribute, value);
+      const original = originalAttributes?.get(attribute) ?? value;
+      const translated = locale === 'zh' ? original : translateText(original, locale);
       if (translated !== value) element.setAttribute(attribute, translated);
+      lastLocalizedAttributes?.set(attribute, translated);
     });
   });
 }
