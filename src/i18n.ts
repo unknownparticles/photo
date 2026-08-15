@@ -151,6 +151,7 @@ const translations: Record<string, string> = {
   '重做上一步操作': 'Redo previous action',
   '本地安全处理': 'Secure local processing',
   '需要帮助': 'Need help',
+  '问题反馈': 'Feedback',
   '调整图片尺寸': 'Resize image',
   '输入目标尺寸，浏览器会在本地完成高质量缩放。': 'Enter a target size. High-quality resizing happens locally in your browser.',
   '宽度': 'Width',
