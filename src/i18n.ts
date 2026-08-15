@@ -405,6 +405,87 @@ const translations: Record<string, string> = {
   '文件类型': 'File type',
   '改名': 'Rename',
   '照片': 'Photo',
+  '通用': 'General',
+  '保持原蒙版': 'Keep original mask',
+  '移除对象': 'Remove object',
+  '扩大边缘，减少残影': 'Expand edges to reduce artifacts',
+  '连续纹理': 'Continuous texture',
+  '天空 / 墙面 / 草地': 'Sky / wall / grass',
+  '人像细节': 'Portrait detail',
+  '收紧边缘，保护细节': 'Tighten edges to preserve detail',
+  '文字 / 水印': 'Text / watermark',
+  '适度扩边清理标记': 'Expand edges to clean marks',
+  '局部重绘': 'Local inpainting',
+  '抓手：拖动画布，松开空格返回画笔': 'Hand tool: drag the canvas, release Space to return to the brush',
+  '滚轮缩放 · 按住空格拖动画布': 'Scroll to zoom · hold Space to pan the canvas',
+  '默认使用轻量 MI-GAN，根据周围纹理和结构快速补全涂抹区域。': 'Uses lightweight MI-GAN by default to quickly fill brushed areas from surrounding texture and structure.',
+  '使用 Moebius 0.22B 进行更重的扩散式补全，适合复杂或较大的缺失区域。': 'Uses Moebius 0.22B for heavier diffusion-based filling of complex or larger missing areas.',
+  '处理模式': 'Processing mode',
+  '推荐': 'Recommended',
+  '快速修复': 'Quick repair',
+  '0 MB · 小污点/细线': '0 MB · small spots / thin lines',
+  '智能重绘': 'Smart inpainting',
+  'MI-GAN · 约 28 MB': 'MI-GAN · about 28 MB',
+  '高质量': 'High quality',
+  'Moebius · 约 1.24 GB': 'Moebius · about 1.24 GB',
+  '蒙版画笔': 'Mask brush',
+  '画布上滚轮缩放 · 按住空格临时切换抓手': 'Scroll on the canvas to zoom · hold Space to temporarily use the hand tool',
+  '撤销一笔': 'Undo stroke',
+  '清空蒙版': 'Clear mask',
+  '修复偏好': 'Repair preference',
+  '边缘策略': 'Edge strategy',
+  '这里只调整蒙版扩展和边缘处理。MI-GAN / 当前 Moebius 权重都不支持文本条件生成，不会按文字生成指定的新物体。': 'This only adjusts mask expansion and edge handling. The current MI-GAN / Moebius weights do not support text-conditioned generation.',
+  '推理步数': 'Inference steps',
+  '引导强度': 'Guidance strength',
+  '随机种子': 'Random seed',
+  'MI-GAN 已缓存': 'MI-GAN cached',
+  'MI-GAN 按需下载': 'Download MI-GAN on demand',
+  'WASM 模式': 'WASM mode',
+  '当前浏览器不支持本地 MI-GAN': 'This browser does not support local MI-GAN',
+  'MI-GAN 根据原图上下文补全蒙版区域；“修复偏好”只改变边缘策略，不作为语义生成提示词。': 'MI-GAN fills masked areas from the original context. Repair preference only changes edge strategy and is not a text generation prompt.',
+  'Moebius 首次使用约需下载 1.24 GB ONNX 权重，仅建议桌面端高性能浏览器按需安装。': 'Moebius downloads about 1.24 GB of ONNX weights on first use and is recommended only for high-performance desktop browsers.',
+  'Moebius 当前权重也没有文本条件接口；“修复偏好”只影响蒙版边缘策略。': 'The current Moebius weights also have no text-conditioning interface; repair preference only affects mask edge strategy.',
+  '正在局部重绘…': 'Inpainting…',
+  '高质量重绘': 'High-quality inpainting',
+  'MI-GAN 默认 · 修复偏好': 'MI-GAN default · repair preference',
+  '轻量智能重绘，支持修复偏好和可选高质量模式': 'Lightweight smart inpainting with repair preference and optional high-quality mode',
+  '准备 MI-GAN': 'Preparing MI-GAN',
+  '准备 Moebius 0.22B': 'Preparing Moebius 0.22B',
+  '局部重绘完成': 'Local inpainting complete',
+  '局部重绘失败': 'Local inpainting failed',
+  '模型下载失败': 'Model download failed',
+  '无法创建局部重绘画布': 'Could not create the inpainting canvas',
+  '无法创建局部重绘蒙版': 'Could not create the inpainting mask',
+  '无法创建局部重绘输出画布': 'Could not create the inpainting output canvas',
+  '请先在图片上涂抹需要重绘的区域': 'Brush the area to inpaint first',
+  'MI-GAN 尚未初始化': 'MI-GAN is not initialized',
+  'MI-GAN 模型已缓存': 'MI-GAN model cached',
+  '下载 MI-GAN 模型': 'Downloading MI-GAN model',
+  '初始化 MI-GAN': 'Initializing MI-GAN',
+  '准备 MI-GAN 输入': 'Preparing MI-GAN input',
+  'MI-GAN 智能重绘': 'MI-GAN inpainting',
+  'MI-GAN 没有返回图像结果': 'MI-GAN returned no image result',
+  '编码图片': 'Encoding image',
+  '解码结果': 'Decoding result',
+  '语义提示：': 'Semantic hint: ',
+  '通用补全': 'General fill',
+  '通用语义提示': 'General semantic hint',
+  '物体移除': 'Object removal',
+  '文字 / 标记移除': 'Text / mark removal',
+  '局部重绘需要支持 WebGPU 的浏览器': 'Local inpainting requires a WebGPU-capable browser',
+  '当前浏览器无法运行 MI-GAN': 'This browser cannot run MI-GAN',
+  '当前浏览器不支持 WebGPU 或 WebAssembly': 'This browser does not support WebGPU or WebAssembly',
+  '默认智能重绘 · 约 28 MB': 'Smart inpainting by default · about 28 MB',
+  '高质量重绘 · 约 1.24 GB': 'High-quality inpainting · about 1.24 GB',
+  'Moebius 0.22B 局部重绘需要支持 WebGPU 的浏览器': 'Moebius 0.22B local inpainting requires a WebGPU-capable browser',
+  '无法创建 MI-GAN 蒙版画布': 'Could not create the MI-GAN mask canvas',
+  'MI-GAN 输出尺寸异常': 'MI-GAN returned an invalid output size',
+  '无法创建 MI-GAN 输出画布': 'Could not create the MI-GAN output canvas',
+  '无法创建 MI-GAN 输入画布': 'Could not create the MI-GAN input canvas',
+  'MI-GAN 输入节点无法识别': 'Could not identify MI-GAN input nodes',
+  'WebGPU 初始化失败，切换 WASM': 'WebGPU initialization failed; switching to WASM',
+  'MI-GAN 局部重绘': 'MI-GAN local inpainting',
+  'Moebius 高质量重绘': 'Moebius high-quality inpainting',
 };
 
 const dynamicTranslations: Array<[RegExp, string]> = [
@@ -437,6 +518,17 @@ const dynamicTranslations: Array<[RegExp, string]> = [
   [/^按需加载 (.+) 模型$/, 'Load $1 model on demand'],
   [/^当前为全图匹配。$/, 'Current mode: full-image match.'],
   [/^当前为联通区域。$/, 'Current mode: connected area.'],
+  [/^(.+) · 已缓存$/, '$1 · cached'],
+  [/^下载 (.+)$/, 'Downloading $1'],
+  [/^语义提示：(.+)$/, 'Semantic hint: $1'],
+  [/^局部重绘 (\d+)\/(\d+)$/, 'Inpainting $1/$2'],
+  [/^模型下载失败：HTTP (\d+)$/, 'Model download failed: HTTP $1'],
+  [/^MI-GAN (.+) 后端初始化失败：(.*)$/, 'MI-GAN $1 backend initialization failed: $2'],
+  [/^MI-GAN 本地运行时初始化失败：(.*)$/, 'MI-GAN local runtime initialization failed: $1'],
+  [/^模型约 28 MB$/, 'Model about 28 MB'],
+  [/^(WebGPU 优先|WASM 模式) · 模型约 28 MB$/, '$1 · model about 28 MB'],
+  [/^MI-GAN 512 · (.+)$/, 'MI-GAN 512 · $1'],
+  [/^Moebius 0\.22B · (\d+) steps · (.+)$/, 'Moebius 0.22B · $1 steps · $2'],
 ];
 
 export function getBrowserLocale(): AppLocale {
@@ -449,7 +541,10 @@ export function translateText(value: string, locale: AppLocale) {
   const exact = translations[value];
   if (exact) return exact;
   for (const [pattern, replacement] of dynamicTranslations) {
-    if (pattern.test(value)) return value.replace(pattern, replacement);
+    if (pattern.test(value)) {
+      const translated = value.replace(pattern, replacement);
+      return Object.entries(translations).sort(([first], [second]) => second.length - first.length).reduce((result, [source, target]) => result.replaceAll(source, target), translated);
+    }
   }
   return value;
 }
@@ -486,6 +581,13 @@ export function applyDocumentLocale(locale: AppLocale) {
   document.title = translateText('Alun Image · 本地图片工具箱', locale);
   const description = document.querySelector<HTMLMetaElement>('meta[name="description"]');
   if (description) description.content = translateText('Alun Image - 隐私优先的本地图片处理工具箱', locale);
+  let manifest = document.querySelector<HTMLLinkElement>('link[rel="manifest"]');
+  if (!manifest) {
+    manifest = document.createElement('link');
+    manifest.rel = 'manifest';
+    document.head.appendChild(manifest);
+  }
+  manifest.href = new URL(locale === 'zh' ? 'manifest.zh.webmanifest' : 'manifest.webmanifest', document.baseURI).toString();
   localizeDocument(document.body, locale);
 }
 

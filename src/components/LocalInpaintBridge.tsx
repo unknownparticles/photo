@@ -4,6 +4,7 @@ import { ArrowRightLeft, Brush, Eraser, Gauge, Hand, Info, Sparkles, WandSparkle
 import { miganAdapter, runInpaint } from '../core/inpaint';
 import type { InpaintMode, InpaintStroke } from '../core/inpaint';
 import { useAppStore } from '../store';
+import { getBrowserLocale, translateText } from '../i18n';
 import './LocalInpaintBridge.css';
 
 type Hosts = {
@@ -49,7 +50,7 @@ function sameHosts(first: Hosts, second: Hosts) {
 }
 
 function findHosts(): Hosts {
-  const smartGroup = Array.from(document.querySelectorAll<HTMLElement>('.tool-group')).find((group) => group.querySelector('.group-label')?.textContent?.includes('智能工具'));
+  const smartGroup = document.querySelector<HTMLElement>('.tool-group[data-tool-category="smart"]');
   return {
     homeGrid: smartGroup?.querySelector<HTMLElement>('.tool-grid') ?? null,
     sidebar: document.querySelector<HTMLElement>('.sidebar-list'),
@@ -59,8 +60,7 @@ function findHosts(): Hosts {
 }
 
 function clickNativeCleanup() {
-  const candidates = Array.from(document.querySelectorAll<HTMLButtonElement>('.tool-card, .sidebar-tool'));
-  const cleanup = candidates.find((button) => button.textContent?.includes('消除笔'));
+  const cleanup = document.querySelector<HTMLButtonElement>('[data-tool-id="cleanup"]');
   cleanup?.click();
 }
 
@@ -416,8 +416,9 @@ export default function LocalInpaintBridge() {
     const heading = document.querySelector<HTMLElement>('.control-heading h2');
     if (!heading) return;
     const previous = heading.textContent;
-    heading.textContent = '局部重绘';
-    return () => { heading.textContent = previous ?? '消除笔'; };
+    const locale = getBrowserLocale();
+    heading.textContent = translateText('局部重绘', locale);
+    return () => { heading.textContent = previous ?? translateText('消除笔', locale); };
   }, [active, hosts.controls]);
 
   function activate() {
