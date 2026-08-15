@@ -9,6 +9,10 @@ npm install
 npm run dev
 ```
 
+## 反馈
+
+如果使用过程中遇到问题，可以直接联系作者：alunnb@outlook.com。
+
 ## 本地 AI 模型
 
 AI 模型和 ONNX Runtime WASM 文件不会进入首屏构建产物，也不会被 PWA 预缓存。用户进入 AI 抠图或 AI 超分模块并运行时，才会从固定版本的 GitHub Raw / npm CDN 地址按需下载对应文件；浏览器会通过 HTTP 缓存复用已下载资源。MODNet 约 26 MB，ESPCN 约 87-101 KB；WASM 兼容模式还需要约 26 MB 运行时。

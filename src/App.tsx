@@ -897,7 +897,7 @@ function App() {
 
       <footer className="site-footer">
         <span><ShieldCheck size={14} /> 图片默认只在你的设备上处理，不会上传服务器</span>
-        <span>Alun Image <i>0.1</i></span>
+        <span className="site-footer-meta"><a className="site-footer-contact" href="mailto:alunnb@outlook.com">问题反馈：alunnb@outlook.com</a><span>Alun Image <i>0.1</i></span></span>
       </footer>
     </div>
   );
