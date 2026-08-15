@@ -77,7 +77,8 @@ import { useAppStore } from './store';
 import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, BackgroundColorSample, BatchCropAlignment, BatchOptions, BatchProgress, CleanupBrushStroke, ExportFormat, IdPhotoClothingLayer, IdPhotoMattingPreview, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
 import { DirectCropPanel, DirectSplitPanel, IdPhotoPanel } from './components/DirectImageControls';
 import { EditorOverlayContext, useEditorOverlay } from './components/EditorOverlay';
-import { getBrowserLocale, observeDocumentLocale } from './i18n';
+import { getStoredLanguagePreference, observeDocumentLocale, resolveLocale, setStoredLanguagePreference } from './i18n';
+import type { LanguagePreference } from './i18n';
 
 type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
 
@@ -410,6 +411,7 @@ function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const [languagePreference, setLanguagePreference] = useState<LanguagePreference>(() => getStoredLanguagePreference());
   const [batchProgress, setBatchProgress] = useState<BatchProgress>({ running: false, completed: 0, failed: 0, total: 0 });
   const {
     assets,
@@ -444,7 +446,9 @@ function App() {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
 
-  useEffect(() => observeDocumentLocale(getBrowserLocale()), []);
+  const locale = resolveLocale(languagePreference);
+
+  useEffect(() => observeDocumentLocale(locale), [locale]);
 
   useEffect(() => {
     const handlePaste = async (event: ClipboardEvent) => {
@@ -496,6 +500,11 @@ function App() {
   function chooseTool(tool: ToolId) {
     setActiveTool(tool);
     if (!assets.length) fileInput.current?.click();
+  }
+
+  function handleLanguageChange(preference: LanguagePreference) {
+    setLanguagePreference(preference);
+    setStoredLanguagePreference(preference);
   }
 
   function handleDrop(event: React.DragEvent<HTMLDivElement>) {
@@ -831,7 +840,7 @@ function App() {
       </header>
 
       {showHistory && <HistoryPopover history={history} onClear={clearHistory} onClose={() => setShowHistory(false)} />}
-      {showSettings && <SettingsPopover onClose={() => setShowSettings(false)} />}
+      {showSettings && <SettingsPopover languagePreference={languagePreference} onLanguageChange={handleLanguageChange} onClose={() => setShowSettings(false)} />}
       {notice && <NoticeBanner notice={notice} onClose={() => setNotice(null)} />}
 
       {!assets.length ? (
@@ -1586,6 +1595,6 @@ function NoticeBanner({ notice, onClose }: { notice: Notice; onClose: () => void
 
 function HistoryPopover({ history, onClear, onClose }: { history: Array<{ id: string; name: string; label: string; detail: string; createdAt: number }>; onClear: () => void; onClose: () => void }) { return <div className="popover history-popover"><div className="popover-heading"><div><span className="eyebrow">LOCAL HISTORY</span><h3>最近处理</h3></div><button className="icon-button" onClick={onClose}><X size={15} /></button></div>{history.length ? <div className="history-list">{history.map((entry) => <div className="history-item" key={entry.id}><span className="history-icon"><CheckCircle2 size={15} /></span><span><strong>{entry.label}</strong><small>{entry.name} · {entry.detail}</small></span></div>)}</div> : <div className="empty-history">还没有处理记录</div>}{history.length > 0 && <button className="text-button danger" onClick={onClear}><Trash2 size={14} /> 清空历史</button>}</div>; }
 
-function SettingsPopover({ onClose }: { onClose: () => void }) { return <div className="popover settings-popover"><div className="popover-heading"><div><span className="eyebrow">SETTINGS</span><h3>设置</h3></div><button className="icon-button" onClick={onClose}><X size={15} /></button></div><div className="settings-list"><div><span>默认输出</span><strong>PNG / 保留透明</strong></div><div><span>元数据</span><strong>默认清除</strong></div><div><span>模型策略</span><strong>本地优先</strong></div></div><div className="privacy-callout"><LockKeyhole size={16} /><span><strong>隐私模式已开启</strong><small>当前版本没有上传通道。</small></span></div></div>; }
+function SettingsPopover({ languagePreference, onLanguageChange, onClose }: { languagePreference: LanguagePreference; onLanguageChange: (preference: LanguagePreference) => void; onClose: () => void }) { return <div className="popover settings-popover"><div className="popover-heading"><div><span className="eyebrow">SETTINGS</span><h3>设置</h3></div><button className="icon-button" onClick={onClose}><X size={15} /></button></div><div className="settings-language"><label htmlFor="language-preference">语言</label><select id="language-preference" className="select-input" value={languagePreference} onChange={(event) => onLanguageChange(event.target.value as LanguagePreference)}><option value="auto">跟随浏览器</option><option value="zh">中文</option><option value="en">English</option></select></div><div className="settings-list"><div><span>默认输出</span><strong>PNG / 保留透明</strong></div><div><span>元数据</span><strong>默认清除</strong></div><div><span>模型策略</span><strong>本地优先</strong></div></div><div className="privacy-callout"><LockKeyhole size={16} /><span><strong>隐私模式已开启</strong><small>当前版本没有上传通道。</small></span></div></div>; }
 
 export default App;
