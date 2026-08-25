@@ -1,5 +1,6 @@
 import type { AiAdapter, AiCapability, AiModelId, AiOperationOptions, AiTask, ImageAsset, ProcessedAsset } from '../types';
 import { canvasToBlob, createAssetFromBlob, loadImage } from './image';
+import { assembleUpscaled, type SingleChannelInfer } from './aiUpscale';
 
 const AI_RESOURCE_REVISION = '28e9cf4f2034c8cde9a332d1c6e21faf60b0b218';
 const ORT_WASM_VERSION = '1.27.0';
@@ -13,7 +14,6 @@ function resourceBaseUrl(value: string | undefined, fallback: string) {
 
 const modelBaseUrl = resourceBaseUrl(import.meta.env.VITE_MODEL_BASE_URL, new URL('models/', DEFAULT_AI_RESOURCE_BASE_URL).toString());
 const ortWasmBaseUrl = resourceBaseUrl(import.meta.env.VITE_ORT_WASM_BASE_URL, DEFAULT_ORT_WASM_BASE_URL);
-const MAX_MODEL_INPUT_EDGE = 1024;
 const MAX_MODEL_OUTPUT_EDGE = 8192;
 
 type OnnxRuntime = typeof import('onnxruntime-web');
@@ -34,11 +34,6 @@ function clamp(value: number, min = 0, max = 255) {
 
 function abortIfNeeded(signal?: AbortSignal) {
   if (signal?.aborted) throw new DOMException('AI 处理已取消', 'AbortError');
-}
-
-function finiteDimension(value: number | string | undefined, fallback: number) {
-  const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.min(MAX_MODEL_INPUT_EDGE, Math.round(parsed)) : fallback;
 }
 
 function outputValue(value: number, min: number, max: number) {
@@ -100,18 +95,6 @@ async function readResponse(response: Response, onProgress?: (value: number) => 
   }
   onProgress?.(0.48);
   return merged.buffer;
-}
-
-function inputSize(session: InferenceSession, image: HTMLImageElement) {
-  const input = session.inputMetadata[0] as { dimensions?: Array<number | string>; shape?: Array<number | string> } | undefined;
-  const dimensions = input?.shape ?? input?.dimensions ?? [];
-  const fallbackScale = Math.min(1, MAX_MODEL_INPUT_EDGE / Math.max(image.naturalWidth, image.naturalHeight));
-  const fallbackWidth = Math.max(1, Math.round(image.naturalWidth * fallbackScale));
-  const fallbackHeight = Math.max(1, Math.round(image.naturalHeight * fallbackScale));
-  return {
-    width: finiteDimension(dimensions[3], fallbackWidth),
-    height: finiteDimension(dimensions[2], fallbackHeight),
-  };
 }
 
 function modnetInputSize(image: HTMLImageElement) {
@@ -228,6 +211,52 @@ export class LocalAiAdapter implements AiAdapter {
     await this.session(modelId, onProgress);
   }
 
+  private async inferSingleChannel(session: InferenceSession, plane: Float32Array, height: number, width: number): Promise<TensorOutput> {
+    const runtime = this.ort;
+    if (!runtime) throw new Error('本地 AI 运行环境尚未初始化');
+    const tensor = new runtime.Tensor('float32', plane, [1, 1, height, width]);
+    const outputs = await session.run({ [session.inputNames[0]]: tensor }) as Record<string, TensorOutput>;
+    const output = outputs[session.outputNames[0]] as TensorOutput | undefined;
+    if (!output) throw new Error('AI 模型没有返回图像结果');
+    return output;
+  }
+
+  private async runUpscale(modelId: AiModelId, image: HTMLImageElement, signal?: AbortSignal): Promise<HTMLCanvasElement> {
+    const session = await this.session(modelId);
+    if (inputChannels(session) !== 1) throw new Error('当前超分模型不是单通道亮度模型，无法执行彩色超分');
+    abortIfNeeded(signal);
+    const factor = modelId === 'espcn-4x' ? 4 : 2;
+    const longest = Math.max(image.naturalWidth, image.naturalHeight);
+    const keepRatio = Math.max(Math.min(1, MAX_MODEL_OUTPUT_EDGE / (longest * factor)), 1 / factor);
+    const sourceWidth = Math.max(1, Math.round(image.naturalWidth * keepRatio));
+    const sourceHeight = Math.max(1, Math.round(image.naturalHeight * keepRatio));
+    const sourceCanvas = document.createElement('canvas');
+    sourceCanvas.width = sourceWidth;
+    sourceCanvas.height = sourceHeight;
+    const sourceContext = sourceCanvas.getContext('2d', { willReadFrequently: true });
+    if (!sourceContext) throw new Error('当前浏览器无法创建 AI 输入画布');
+    sourceContext.imageSmoothingEnabled = true;
+    sourceContext.imageSmoothingQuality = 'high';
+    sourceContext.drawImage(image, 0, 0, sourceWidth, sourceHeight);
+    const pixels = sourceContext.getImageData(0, 0, sourceWidth, sourceHeight).data;
+    const infer: SingleChannelInfer = async (plane, tileHeight, tileWidth) => {
+      abortIfNeeded(signal);
+      const output = await this.inferSingleChannel(session, plane, tileHeight, tileWidth);
+      return output.data as Float32Array;
+    };
+    const assembled = await assembleUpscaled({ data: pixels, width: sourceWidth, height: sourceHeight }, factor, infer);
+    abortIfNeeded(signal);
+    const resultCanvas = document.createElement('canvas');
+    resultCanvas.width = assembled.width;
+    resultCanvas.height = assembled.height;
+    const resultContext = resultCanvas.getContext('2d');
+    if (!resultContext) throw new Error('当前浏览器无法创建 AI 输出画布');
+    const target = resultContext.createImageData(assembled.width, assembled.height);
+    target.data.set(assembled.data);
+    resultContext.putImageData(target, 0, 0);
+    return resultCanvas;
+  }
+
   async run(input: ImageAsset, options: AiOperationOptions, signal?: AbortSignal): Promise<ProcessedAsset> {
     abortIfNeeded(signal);
     let session = await this.session(options.modelId);
@@ -235,11 +264,25 @@ export class LocalAiAdapter implements AiAdapter {
     if (!runtime) throw new Error('本地 AI 运行环境尚未初始化');
     const image = await loadImage(input.blob);
     const task = taskForModel(options.modelId);
-    const size = task === 'remove-background' ? modnetInputSize(image) : inputSize(session, image);
+    if (task === 'upscale') {
+      let upscaled: HTMLCanvasElement;
+      try {
+        upscaled = await this.runUpscale(options.modelId, image, signal);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') throw error;
+        if (this.runtime !== 'webgpu' || this.forcedWasm || typeof WebAssembly === 'undefined') throw error;
+        await this.switchToWasm(options.modelId);
+        upscaled = await this.runUpscale(options.modelId, image, signal);
+      }
+      abortIfNeeded(signal);
+      const blob = await canvasToBlob(upscaled, 'image/png');
+      return createAssetFromBlob(blob, `${input.name.replace(/\.[^/.]+$/, '')}-ESPCN${options.modelId === 'espcn-4x' ? 4 : 2}x.png`);
+    }
+    const size = modnetInputSize(image);
     const inputCanvas = document.createElement('canvas');
     inputCanvas.width = size.width;
     inputCanvas.height = size.height;
-    const inputContext = inputCanvas.getContext('2d');
+    const inputContext = inputCanvas.getContext('2d', { willReadFrequently: true });
     if (!inputContext) throw new Error('当前浏览器无法创建 AI 输入画布');
     inputContext.drawImage(image, 0, 0, size.width, size.height);
     const pixels = inputContext.getImageData(0, 0, size.width, size.height).data;
@@ -250,11 +293,10 @@ export class LocalAiAdapter implements AiAdapter {
       const red = pixels[index * 4] / 255;
       const green = pixels[index * 4 + 1] / 255;
       const blue = pixels[index * 4 + 2] / 255;
-      const normalize = task === 'remove-background' ? (value: number) => value * 2 - 1 : (value: number) => value;
-      data[index] = channels === 1 ? normalize((red + green + blue) / 3) : normalize(red);
+      data[index] = channels === 1 ? (red + green + blue) / 3 * 2 - 1 : red * 2 - 1;
       if (channels === 3) {
-        data[plane + index] = normalize(green);
-        data[plane * 2 + index] = normalize(blue);
+        data[plane + index] = green * 2 - 1;
+        data[plane * 2 + index] = blue * 2 - 1;
       }
     }
     const tensor = new runtime.Tensor('float32', data, [1, channels, size.height, size.width]);
@@ -265,27 +307,25 @@ export class LocalAiAdapter implements AiAdapter {
     } catch (error) {
       if (this.runtime !== 'webgpu' || this.forcedWasm || typeof WebAssembly === 'undefined') throw error;
       session = await this.switchToWasm(options.modelId);
-      const wasmSize = taskForModel(options.modelId) === 'remove-background' ? modnetInputSize(image) : inputSize(session, image);
+      const wasmSize = modnetInputSize(image);
       const wasmCanvas = document.createElement('canvas');
       wasmCanvas.width = wasmSize.width;
       wasmCanvas.height = wasmSize.height;
-      const wasmContext = wasmCanvas.getContext('2d');
+      const wasmContext = wasmCanvas.getContext('2d', { willReadFrequently: true });
       if (!wasmContext) throw new Error('当前浏览器无法创建 AI 输入画布');
       wasmContext.drawImage(image, 0, 0, wasmSize.width, wasmSize.height);
       const wasmPixels = wasmContext.getImageData(0, 0, wasmSize.width, wasmSize.height).data;
       const wasmPlane = wasmSize.width * wasmSize.height;
       const wasmChannels = inputChannels(session);
       const wasmData = new Float32Array(wasmPlane * wasmChannels);
-      const wasmTask = taskForModel(options.modelId);
       for (let index = 0; index < wasmPlane; index += 1) {
         const red = wasmPixels[index * 4] / 255;
         const green = wasmPixels[index * 4 + 1] / 255;
         const blue = wasmPixels[index * 4 + 2] / 255;
-        const normalize = wasmTask === 'remove-background' ? (value: number) => value * 2 - 1 : (value: number) => value;
-        wasmData[index] = wasmChannels === 1 ? normalize((red + green + blue) / 3) : normalize(red);
+        wasmData[index] = wasmChannels === 1 ? (red + green + blue) / 3 * 2 - 1 : red * 2 - 1;
         if (wasmChannels === 3) {
-          wasmData[wasmPlane + index] = normalize(green);
-          wasmData[wasmPlane * 2 + index] = normalize(blue);
+          wasmData[wasmPlane + index] = green * 2 - 1;
+          wasmData[wasmPlane * 2 + index] = blue * 2 - 1;
         }
       }
       const wasmTensor = new runtime.Tensor('float32', wasmData, [1, wasmChannels, wasmSize.height, wasmSize.width]);
@@ -295,21 +335,16 @@ export class LocalAiAdapter implements AiAdapter {
     const output = outputs[session.outputNames[0]] as TensorOutput | undefined;
     if (!output) throw new Error('AI 模型没有返回图像结果');
     const outputImage = outputCanvas(output, task);
-    if (task === 'remove-background') {
-      const original = document.createElement('canvas');
-      original.width = image.naturalWidth;
-      original.height = image.naturalHeight;
-      const originalContext = original.getContext('2d');
-      if (!originalContext) throw new Error('当前浏览器无法创建抠图画布');
-      originalContext.drawImage(image, 0, 0, original.width, original.height);
-      originalContext.globalCompositeOperation = 'destination-in';
-      originalContext.drawImage(outputImage, 0, 0, original.width, original.height);
-      const blob = await canvasToBlob(original, 'image/png');
-      return createAssetFromBlob(blob, `${input.name.replace(/\.[^/.]+$/, '')}-MODNet抠图.png`);
-    }
-    const blob = await canvasToBlob(outputImage, 'image/png');
-    const scale = options.modelId === 'espcn-4x' ? 4 : 2;
-    return createAssetFromBlob(blob, `${input.name.replace(/\.[^/.]+$/, '')}-ESPCN${scale}x.png`);
+    const original = document.createElement('canvas');
+    original.width = image.naturalWidth;
+    original.height = image.naturalHeight;
+    const originalContext = original.getContext('2d');
+    if (!originalContext) throw new Error('当前浏览器无法创建抠图画布');
+    originalContext.drawImage(image, 0, 0, original.width, original.height);
+    originalContext.globalCompositeOperation = 'destination-in';
+    originalContext.drawImage(outputImage, 0, 0, original.width, original.height);
+    const blob = await canvasToBlob(original, 'image/png');
+    return createAssetFromBlob(blob, `${input.name.replace(/\.[^/.]+$/, '')}-MODNet抠图.png`);
   }
 }
 
