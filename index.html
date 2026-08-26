@@ -5,12 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f7f8f5" />
     <meta name="description" content="Alun Image - Privacy-first local image toolkit" />
-    <script
-      defer
-      src="https://vibecafe.ai/telemetry/v1.js"
-      data-vc-product-id="cmspiznh900000ajbe7f2gf7c"
-      data-vc-auth-key="vc_web_1LZ5FbIUEV_TIfKIz_BTaif-96mi7hpuP0DUlvu4V3U"
-    ></script>
+    <script>
+      (function () {
+        var host = location.hostname;
+        if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || location.protocol === 'file:') return;
+        var s = document.createElement('script');
+        s.defer = true;
+        s.src = 'https://vibecafe.ai/telemetry/v1.js';
+        s.setAttribute('data-vc-product-id', 'cmspiznh900000ajbe7f2gf7c');
+        s.setAttribute('data-vc-auth-key', 'vc_web_1LZ5FbIUEV_TIfKIz_BTaif-96mi7hpuP0DUlvu4V3U');
+        document.head.appendChild(s);
+      })();
+    </script>
     <link rel="icon" href="/photo/favicon.svg" />
     <title>Alun Image · Local Image Toolkit</title>
   </head>
