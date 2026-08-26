@@ -1,4 +1,5 @@
 import type { BackgroundBrushPoint, BackgroundBrushStroke, BatchCropAlignment, CleanupBrushStroke, ExportFormat, ExportOptions, IdPhotoClothingLayer, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, ProcessedAsset, SplitLine, WatermarkOptions } from '../types';
+import { runDetailPass, type DetailValues } from './detailClient';
 
 const DEFAULT_MAX_EDGE = 8192;
 
@@ -300,15 +301,26 @@ export function alignedCropRect(sourceWidth: number, sourceHeight: number, targe
   };
 }
 
-export async function composeIdPhotoAsset(asset: ImageAsset, background: string, clothingLayers: IdPhotoClothingLayer[] = []) {
+export async function composeIdPhotoAsset(asset: ImageAsset, background: string, clothingLayers: IdPhotoClothingLayer[] = [], subjectOffset?: { x: number; y: number }, backgroundImage?: ImageAsset, subjectScale = 100) {
   const image = await loadImage(asset.blob);
   const canvas = document.createElement('canvas');
   canvas.width = image.naturalWidth;
   canvas.height = image.naturalHeight;
   const context = canvas.getContext('2d');
   if (!context) throw new Error('当前浏览器无法创建证件照画布');
-  context.fillStyle = background;
-  context.fillRect(0, 0, canvas.width, canvas.height);
+  if (backgroundImage) {
+    const bgImage = await loadImage(backgroundImage.blob);
+    const scale = Math.max(canvas.width / bgImage.naturalWidth, canvas.height / bgImage.naturalHeight);
+    const drawW = bgImage.naturalWidth * scale;
+    const drawH = bgImage.naturalHeight * scale;
+    context.drawImage(bgImage, (canvas.width - drawW) / 2, (canvas.height - drawH) / 2, drawW, drawH);
+  } else {
+    context.fillStyle = background;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  const offsetX = ((subjectOffset?.x ?? 0) / 100) * canvas.width;
+  const offsetY = ((subjectOffset?.y ?? 0) / 100) * canvas.height;
 
   const drawClothing = async (layers: IdPhotoClothingLayer[]) => {
     for (const layer of layers) {
@@ -320,8 +332,13 @@ export async function composeIdPhotoAsset(asset: ImageAsset, background: string,
     }
   };
 
+  const drawW = canvas.width * subjectScale / 100;
+  const drawH = drawW * image.naturalHeight / image.naturalWidth;
+  const drawX = offsetX;
+  const drawY = offsetY;
+
   await drawClothing(clothingLayers.filter((layer) => layer.placement === 'behind'));
-  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  context.drawImage(image, drawX, drawY, drawW, drawH);
   await drawClothing(clothingLayers.filter((layer) => layer.placement === 'front'));
   const blob = await canvasToBlob(canvas, 'image/jpeg', 0.94);
   return createAssetFromBlob(blob, addSuffix(asset.name, '证件照'));
@@ -390,9 +407,9 @@ export async function createCollage(assets: ImageAsset[], layout: 'horizontal' |
   return createAssetFromBlob(blob, `拼图-${new Date().toISOString().slice(0, 10)}.png`);
 }
 
-export async function applyAdjustments(asset: ImageAsset, values: { brightness: number; contrast: number; saturation: number; blur: number }) {
+export async function applyAdjustments(asset: ImageAsset, values: { brightness: number; contrast: number; saturation: number; blur: number } & DetailValues) {
   const canvas = await drawAsset(asset);
-  const context = canvas.getContext('2d');
+  const context = canvas.getContext('2d', { willReadFrequently: true });
   if (!context) throw new Error('当前浏览器无法创建画布');
   const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
   const brightness = values.brightness / 100;
@@ -415,6 +432,7 @@ export async function applyAdjustments(asset: ImageAsset, values: { brightness: 
     pixels.data[index + 2] = clamp(blue);
   }
   context.putImageData(pixels, 0, 0);
+  let output = canvas;
   if (values.blur > 0) {
     const filtered = document.createElement('canvas');
     filtered.width = canvas.width;
@@ -423,11 +441,30 @@ export async function applyAdjustments(asset: ImageAsset, values: { brightness: 
     if (!filteredContext) throw new Error('当前浏览器无法创建画布');
     filteredContext.filter = `blur(${values.blur}px)`;
     filteredContext.drawImage(canvas, 0, 0);
-    const blob = await canvasToBlob(filtered, 'image/png');
-    return createAssetFromBlob(blob, addSuffix(asset.name, '编辑'));
+    output = filtered;
   }
+  await applyDetailPassToCanvas(output, values);
+  const blob = await canvasToBlob(output, 'image/png');
+  return createAssetFromBlob(blob, addSuffix(asset.name, '编辑'));
+}
+
+export async function applyDetailPass(asset: ImageAsset, values: DetailValues): Promise<ImageAsset> {
+  if (!values.denoise && !values.sharpen) return asset;
+  const canvas = await drawAsset(asset);
+  await applyDetailPassToCanvas(canvas, values);
   const blob = await canvasToBlob(canvas, 'image/png');
   return createAssetFromBlob(blob, addSuffix(asset.name, '编辑'));
+}
+
+async function applyDetailPassToCanvas(canvas: HTMLCanvasElement, values: DetailValues) {
+  if (!values.denoise && !values.sharpen) return;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) throw new Error('当前浏览器无法创建画布');
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+  const processed = await runDetailPass(pixels.data, canvas.width, canvas.height, values);
+  const target = context.createImageData(canvas.width, canvas.height);
+  target.data.set(processed);
+  context.putImageData(target, 0, 0);
 }
 
 export async function applyLocalAiFallback(asset: ImageAsset, task: 'upscale' | 'enhance' | 'denoise', scale = 2) {

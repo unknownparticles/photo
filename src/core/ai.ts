@@ -1,6 +1,7 @@
 import type { AiAdapter, AiCapability, AiModelId, AiOperationOptions, AiTask, ImageAsset, ProcessedAsset } from '../types';
 import { canvasToBlob, createAssetFromBlob, loadImage } from './image';
 import { assembleUpscaled, type SingleChannelInfer } from './aiUpscale';
+import { runDetailPass } from './detailClient';
 
 const AI_RESOURCE_REVISION = '28e9cf4f2034c8cde9a332d1c6e21faf60b0b218';
 const ORT_WASM_VERSION = '1.27.0';
@@ -221,7 +222,7 @@ export class LocalAiAdapter implements AiAdapter {
     return output;
   }
 
-  private async runUpscale(modelId: AiModelId, image: HTMLImageElement, signal?: AbortSignal): Promise<HTMLCanvasElement> {
+  private async runUpscale(modelId: AiModelId, image: HTMLImageElement, options: AiOperationOptions, signal?: AbortSignal): Promise<HTMLCanvasElement> {
     const session = await this.session(modelId);
     if (inputChannels(session) !== 1) throw new Error('当前超分模型不是单通道亮度模型，无法执行彩色超分');
     abortIfNeeded(signal);
@@ -238,7 +239,9 @@ export class LocalAiAdapter implements AiAdapter {
     sourceContext.imageSmoothingEnabled = true;
     sourceContext.imageSmoothingQuality = 'high';
     sourceContext.drawImage(image, 0, 0, sourceWidth, sourceHeight);
-    const pixels = sourceContext.getImageData(0, 0, sourceWidth, sourceHeight).data;
+    const sourceImageData = sourceContext.getImageData(0, 0, sourceWidth, sourceHeight);
+    const denoisedSource = await runDetailPass(sourceImageData.data, sourceWidth, sourceHeight, { denoise: options.denoise ?? 0 });
+    const pixels = denoisedSource === sourceImageData.data ? sourceImageData.data : denoisedSource;
     const infer: SingleChannelInfer = async (plane, tileHeight, tileWidth) => {
       abortIfNeeded(signal);
       const output = await this.inferSingleChannel(session, plane, tileHeight, tileWidth);
@@ -254,6 +257,13 @@ export class LocalAiAdapter implements AiAdapter {
     const target = resultContext.createImageData(assembled.width, assembled.height);
     target.data.set(assembled.data);
     resultContext.putImageData(target, 0, 0);
+    if (options.sharpen && options.sharpen > 0) {
+      const sharpened = resultContext.getImageData(0, 0, resultCanvas.width, resultCanvas.height);
+      const processed = await runDetailPass(sharpened.data, resultCanvas.width, resultCanvas.height, { sharpen: options.sharpen });
+      const target = resultContext.createImageData(resultCanvas.width, resultCanvas.height);
+      target.data.set(processed);
+      resultContext.putImageData(target, 0, 0);
+    }
     return resultCanvas;
   }
 
@@ -267,12 +277,12 @@ export class LocalAiAdapter implements AiAdapter {
     if (task === 'upscale') {
       let upscaled: HTMLCanvasElement;
       try {
-        upscaled = await this.runUpscale(options.modelId, image, signal);
+        upscaled = await this.runUpscale(options.modelId, image, options, signal);
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') throw error;
         if (this.runtime !== 'webgpu' || this.forcedWasm || typeof WebAssembly === 'undefined') throw error;
         await this.switchToWasm(options.modelId);
-        upscaled = await this.runUpscale(options.modelId, image, signal);
+        upscaled = await this.runUpscale(options.modelId, image, options, signal);
       }
       abortIfNeeded(signal);
       const blob = await canvasToBlob(upscaled, 'image/png');

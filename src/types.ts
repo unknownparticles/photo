@@ -17,6 +17,33 @@ export type ToolId =
 
 export type ExportFormat = 'image/jpeg' | 'image/png' | 'image/webp' | 'image/avif' | 'image/gif';
 
+export interface Layer {
+  id: string;
+  name: string;
+  type: string;
+  blob: Blob;
+  url: string;
+  width: number;
+  height: number;
+  visible: boolean;
+  offsetX: number;
+  offsetY: number;
+}
+
+export interface PhotoDocument {
+  id: string;
+  name: string;
+  type: string;
+  createdAt: number;
+  canvasWidth: number;
+  canvasHeight: number;
+  layers: Layer[];
+  activeLayerId: string | null;
+  edited: boolean;
+  origin?: { baselineId: string; url: string; width: number; height: number };
+  originMap?: { scaleX: number; scaleY: number; x: number; y: number };
+}
+
 export interface ImageAsset {
   id: string;
   name: string;
@@ -31,6 +58,8 @@ export interface ImageAsset {
   sourceFile?: File;
   metadata?: Record<string, unknown>;
   backgroundSourceBlob?: Blob;
+  origin?: { assetId: string; url: string; width: number; height: number };
+  originMap?: { scaleX: number; scaleY: number; x: number; y: number };
 }
 
 export interface ProcessedAsset extends ImageAsset {
@@ -81,8 +110,10 @@ export interface BackgroundColorSample extends BackgroundBrushPoint {
 export interface IdPhotoMattingPreview {
   subject: ImageAsset;
   source: ImageAsset;
-  targetColor: [number, number, number];
+  targetColor: [number, number, number] | null;
   targetColors: [number, number, number][];
+  subjectOffset?: { x: number; y: number };
+  subjectScale?: number;
 }
 
 export interface IdPhotoClothingLayer {
@@ -166,11 +197,13 @@ export type AiModelId = 'modnet' | 'espcn-2x' | 'espcn-4x';
 export type AiOperationOptions = {
   modelId: AiModelId;
   scale?: number;
+  denoise?: number;
+  sharpen?: number;
 };
 
 export type AiRequest =
-  | { mode: 'model'; task: AiTask; scale?: 2 | 4 }
-  | { mode: 'local-fallback'; task: 'upscale'; scale?: 2 | 4 };
+  | { mode: 'model'; task: AiTask; scale?: 2 | 4; denoise?: number; sharpen?: number }
+  | { mode: 'local-fallback'; task: 'upscale'; scale?: 2 | 4; denoise?: number; sharpen?: number };
 
 export interface LocalProcessor {
   process(asset: ImageAsset, operation: ImageOperation, signal?: AbortSignal): Promise<ProcessedAsset>;
