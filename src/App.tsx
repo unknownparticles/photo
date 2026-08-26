@@ -16,6 +16,8 @@ import {
   Download,
   Droplets,
   Eraser,
+  Eye,
+  EyeOff,
   FileDown,
   FileImage,
   Film,
@@ -29,6 +31,7 @@ import {
   Menu,
   Moon,
   PackageOpen,
+  Pencil,
   PanelLeft,
   Paintbrush,
   Pipette,
@@ -48,8 +51,11 @@ import {
   Redo2,
 } from 'lucide-react';
 import { aiAdapter } from './core/ai';
+import { documentFromAsset, flattenDocument, layerFromAsset, topmostVisibleLayer } from './core/documents';
+import { originLayerStyle } from './core/originLayout';
 import {
   applyAdjustments,
+  applyDetailPass,
   applyBackgroundBrush,
   applyCleanupBrush,
   applyWatermark,
@@ -69,22 +75,23 @@ import {
   readImageMetadata,
   removeBackgroundAsset,
   applyLocalAiFallback,
-  resizeAsset,
   splitAsset,
   updateImageMetadata,
+  loadImage,
+  canvasToBlob,
 } from './core/image';
 import { useAppStore } from './store';
-import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, BackgroundColorSample, BatchCropAlignment, BatchOptions, BatchProgress, CleanupBrushStroke, ExportFormat, IdPhotoClothingLayer, IdPhotoMattingPreview, ImageAsset, ImageOperation, LocalBackgroundRemovalOptions, SplitLine, ToolId, WatermarkOptions } from './types';
+import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, BackgroundColorSample, BatchCropAlignment, BatchOptions, BatchProgress, CleanupBrushStroke, ExportFormat, IdPhotoClothingLayer, IdPhotoMattingPreview, ImageAsset, ImageOperation, Layer, LocalBackgroundRemovalOptions, PhotoDocument, SplitLine, ToolId, WatermarkOptions } from './types';
 import { DirectCropPanel, DirectSplitPanel, IdPhotoPanel } from './components/DirectImageControls';
 import { EditorOverlayContext, useEditorOverlay } from './components/EditorOverlay';
 import { getStoredLanguagePreference, observeDocumentLocale, resolveLocale, setStoredLanguagePreference } from './i18n';
 import type { LanguagePreference } from './i18n';
 
-type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
+export type Notice = { type: 'success' | 'warning' | 'error'; text: string } | null;
 
-type EditValues = { brightness: number; contrast: number; saturation: number; blur: number };
+type EditValues = { brightness: number; contrast: number; saturation: number; blur: number; denoise: number; sharpen: number };
 
-const defaultEditValues: EditValues = { brightness: 0, contrast: 0, saturation: 0, blur: 0 };
+const defaultEditValues: EditValues = { brightness: 0, contrast: 0, saturation: 0, blur: 0, denoise: 0, sharpen: 0 };
 
 function editPreviewFilter(values: EditValues) {
   return `brightness(${100 + values.brightness}%) contrast(${100 + values.contrast}%) saturate(${100 + values.saturation}%) blur(${values.blur}px)`;
@@ -177,151 +184,79 @@ type PreviewInteraction =
 const MIN_PREVIEW_ZOOM = 1;
 const MAX_PREVIEW_ZOOM = 4;
 
-function distanceBetween(first: PreviewPoint, second: PreviewPoint) {
-  return Math.hypot(first.x - second.x, first.y - second.y);
-}
 
-function midpointBetween(first: PreviewPoint, second: PreviewPoint): PreviewPoint {
-  return { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
-}
 
-function clampPreviewOffset(offset: PreviewPoint, zoom: number, image: { width: number; height: number }, stage: { width: number; height: number }) {
-  const maxX = Math.max(0, (image.width * zoom - stage.width) / 2);
-  const maxY = Math.max(0, (image.height * zoom - stage.height) / 2);
-  return {
-    x: Math.max(-maxX, Math.min(maxX, offset.x)),
-    y: Math.max(-maxY, Math.min(maxY, offset.y)),
-  };
-}
 
-function PreviewImage({ asset, editValues, onOverlayHost }: { asset: ImageAsset; editValues?: EditValues; onOverlayHost: (host: HTMLDivElement | null) => void }) {
+function PreviewImage({ document, editValues, compare, onOverlayHost }: { document: PhotoDocument; editValues?: EditValues; compare?: { url: string; width: number; height: number; map: { scaleX: number; scaleY: number; x: number; y: number } } | null; onOverlayHost: (host: HTMLDivElement | null) => void }) {
   const stageRef = useRef<HTMLDivElement>(null);
-  const imageRef = useRef<HTMLImageElement>(null);
   const pointersRef = useRef(new Map<number, PreviewPoint>());
   const interactionRef = useRef<PreviewInteraction>(null);
   const [zoom, setZoom] = useState(MIN_PREVIEW_ZOOM);
   const [offset, setOffset] = useState<PreviewPoint>({ x: 0, y: 0 });
   const [displaySize, setDisplaySize] = useState({ width: 0, height: 0 });
 
-  const measure = useCallback(() => {
-    const stage = stageRef.current;
-    const image = imageRef.current;
-    if (!stage || !image) return null;
-    return {
-      stage: { width: stage.clientWidth, height: stage.clientHeight },
-      image: displaySize,
-    };
-  }, [displaySize]);
-
   const fitImage = useCallback(() => {
     const stage = stageRef.current;
-    const image = imageRef.current;
-    if (!stage || !image?.naturalWidth || !image.naturalHeight) return;
-    const scale = Math.min((stage.clientWidth - 32) / image.naturalWidth, (stage.clientHeight - 32) / image.naturalHeight, 1);
-    setDisplaySize({ width: Math.max(1, image.naturalWidth * scale), height: Math.max(1, image.naturalHeight * scale) });
-  }, []);
-
-  const updateTransform = useCallback((nextZoom: number, nextOffset: PreviewPoint) => {
-    const measured = measure();
-    const safeZoom = Math.max(MIN_PREVIEW_ZOOM, Math.min(MAX_PREVIEW_ZOOM, nextZoom));
-    const safeOffset = measured ? clampPreviewOffset(nextOffset, safeZoom, measured.image, measured.stage) : nextOffset;
-    setZoom(safeZoom);
-    setOffset(safeOffset);
-  }, [measure]);
-
-  function handleImageLoad() {
-    fitImage();
-  }
+    if (!stage || !document.canvasWidth || !document.canvasHeight) return;
+    const scale = Math.min((stage.clientWidth - 32) / document.canvasWidth, (stage.clientHeight - 32) / document.canvasHeight, 1);
+    setDisplaySize({ width: Math.max(1, document.canvasWidth * scale), height: Math.max(1, document.canvasHeight * scale) });
+  }, [document.canvasWidth, document.canvasHeight]);
 
   useLayoutEffect(() => {
-    const handleResize = () => fitImage();
-    const observer = new ResizeObserver(handleResize);
+    fitImage();
+    const observer = new ResizeObserver(fitImage);
     if (stageRef.current) observer.observe(stageRef.current);
-    window.addEventListener('resize', handleResize);
+    window.addEventListener('resize', fitImage);
     return () => {
       observer.disconnect();
-      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('resize', fitImage);
     };
   }, [fitImage]);
-
-  useLayoutEffect(() => {
-    const measured = measure();
-    if (!measured) return;
-    setOffset((current) => clampPreviewOffset(current, zoom, measured.image, measured.stage));
-  }, [displaySize.height, displaySize.width, measure, zoom]);
 
   useEffect(() => {
     setZoom(MIN_PREVIEW_ZOOM);
     setOffset({ x: 0, y: 0 });
     pointersRef.current.clear();
     interactionRef.current = null;
-  }, [asset.id]);
+  }, [document.id]);
 
   function localPoint(event: React.PointerEvent<HTMLDivElement>): PreviewPoint {
     const rect = event.currentTarget.getBoundingClientRect();
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   }
 
-  function setZoomAtPoint(nextZoom: number, point: PreviewPoint) {
-    const measured = measure();
-    if (!measured) return;
-    const imagePoint = {
-      x: (point.x - measured.stage.width / 2 - offset.x) / zoom,
-      y: (point.y - measured.stage.height / 2 - offset.y) / zoom,
-    };
-    const nextOffset = {
-      x: point.x - measured.stage.width / 2 - imagePoint.x * nextZoom,
-      y: point.y - measured.stage.height / 2 - imagePoint.y * nextZoom,
-    };
-    updateTransform(nextZoom, nextOffset);
-  }
-
-  function handleWheel(event: React.WheelEvent<HTMLDivElement>) {
-    event.preventDefault();
-    const rect = event.currentTarget.getBoundingClientRect();
-    const point = { x: event.clientX - rect.left, y: event.clientY - rect.top };
-    const factor = Math.exp(-event.deltaY * 0.002);
-    setZoomAtPoint(zoom * factor, point);
-  }
-
   function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    if (event.button !== 0 && event.pointerType === 'mouse') return;
+    const target = event.target as Element | null;
+    if (target?.closest('.editor-overlay-host')) return;
     const point = localPoint(event);
     pointersRef.current.set(event.pointerId, point);
+    event.currentTarget.setPointerCapture(event.pointerId);
     if (pointersRef.current.size >= 2) {
-      const [first, second] = Array.from(pointersRef.current.values());
-      interactionRef.current = { type: 'pinch', distance: distanceBetween(first, second), midpoint: midpointBetween(first, second), zoom, offset };
-    } else {
+      const [a, b] = Array.from(pointersRef.current.values());
+      interactionRef.current = { type: 'pinch', distance: Math.hypot(a.x - b.x, a.y - b.y), midpoint: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, zoom, offset };
+    } else if (pointersRef.current.size === 1) {
+      const [point] = Array.from(pointersRef.current.values());
       interactionRef.current = { type: 'pan', start: point, offset };
     }
   }
 
   function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
-    if (!pointersRef.current.has(event.pointerId)) return;
+    const previous = pointersRef.current.get(event.pointerId);
+    if (!previous || !interactionRef.current) return;
     const point = localPoint(event);
     pointersRef.current.set(event.pointerId, point);
     const interaction = interactionRef.current;
-    if (!interaction) return;
     if (interaction.type === 'pan') {
-      if (pointersRef.current.size !== 1 || zoom <= MIN_PREVIEW_ZOOM) return;
-      updateTransform(zoom, { x: interaction.offset.x + point.x - interaction.start.x, y: interaction.offset.y + point.y - interaction.start.y });
-      return;
+      const dx = point.x - interaction.start.x;
+      const dy = point.y - interaction.start.y;
+      setOffset((current) => ({ x: current.x + dx, y: current.y + dy }));
+      interaction.start = point;
+    } else if (interaction.type === 'pinch' && pointersRef.current.size >= 2) {
+      const [a, b] = Array.from(pointersRef.current.values());
+      const distance = Math.hypot(a.x - b.x, a.y - b.y);
+      updateTransform(interaction.zoom * (distance / interaction.distance), offset);
     }
-    if (pointersRef.current.size < 2) return;
-    const [first, second] = Array.from(pointersRef.current.values());
-    const midpoint = midpointBetween(first, second);
-    const nextZoom = interaction.zoom * (distanceBetween(first, second) / Math.max(1, interaction.distance));
-    const measured = measure();
-    if (!measured) return;
-    const imagePoint = {
-      x: (interaction.midpoint.x - measured.stage.width / 2 - interaction.offset.x) / interaction.zoom,
-      y: (interaction.midpoint.y - measured.stage.height / 2 - interaction.offset.y) / interaction.zoom,
-    };
-    updateTransform(nextZoom, {
-      x: midpoint.x - measured.stage.width / 2 - imagePoint.x * nextZoom,
-      y: midpoint.y - measured.stage.height / 2 - imagePoint.y * nextZoom,
-    });
   }
 
   function handlePointerEnd(event: React.PointerEvent<HTMLDivElement>) {
@@ -334,18 +269,42 @@ function PreviewImage({ asset, editValues, onOverlayHost }: { asset: ImageAsset;
     }
   }
 
+  function updateTransform(nextZoom: number, nextOffset: PreviewPoint) {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const safeZoom = Math.max(MIN_PREVIEW_ZOOM, Math.min(MAX_PREVIEW_ZOOM, nextZoom));
+    const image = displaySize;
+    const clampedX = image.width * safeZoom <= stage.clientWidth - 0 ? 0 : Math.min(0, Math.max(-(image.width * safeZoom - stage.clientWidth), nextOffset.x));
+    const clampedY = image.height * safeZoom <= stage.clientHeight ? 0 : Math.min(0, Math.max(-(image.height * safeZoom - stage.clientHeight), nextOffset.y));
+    setZoom(safeZoom);
+    setOffset({ x: clampedX, y: clampedY });
+  }
+
+  const scaleX = displaySize.width / document.canvasWidth;
+  const scaleY = displaySize.height / document.canvasHeight;
+
   return (
     <div
       ref={stageRef}
       className={`preview-image-viewport ${zoom > MIN_PREVIEW_ZOOM ? 'is-zoomed' : ''}`}
-      onWheel={handleWheel}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerEnd}
       onPointerCancel={handlePointerEnd}
     >
       <div className="preview-image-canvas" style={{ width: displaySize.width, height: displaySize.height, transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${zoom})` }}>
-        <img ref={imageRef} className="main-preview" src={asset.url} alt={asset.name} onLoad={handleImageLoad} style={editValues ? { filter: editPreviewFilter(editValues) } : undefined} />
+        {(() => {
+          const visible = document.layers.filter((layer) => layer.visible);
+          return visible.map((layer, index) => (
+            <img key={layer.id} src={layer.url} alt={layer.name} draggable={false} style={{ position: 'absolute', left: layer.offsetX * scaleX, top: layer.offsetY * scaleY, width: layer.width * scaleX, height: layer.height * scaleY, boxShadow: '0 16px 40px rgba(36,44,38,.16)', filter: editValues && index === visible.length - 1 ? editPreviewFilter(editValues) : undefined }} />
+          ));
+        })()}
+        {compare && displaySize.width > 0 ? (
+          <div className="preview-origin-layer">
+            <img src={compare.url} alt="原图对比" draggable={false} style={originLayerStyle(document.canvasWidth, document.canvasHeight, displaySize.width, displaySize.height, compare.width, compare.height, compare.map)} />
+            <span className="preview-origin-tag">原图 · 仅保留裁剪</span>
+          </div>
+        ) : null}
         <div ref={onOverlayHost} className="editor-overlay-host" />
       </div>
     </div>
@@ -399,7 +358,8 @@ async function fileToAsset(file: File) {
   if (!file.type.startsWith('image/')) return null;
   const [normalizedBlob, metadata] = await Promise.all([normalizeImageOrientation(file), readImageMetadata(file)]);
   const asset = await createAssetFromBlob(normalizedBlob, file.name, file);
-  return metadata ? { ...asset, metadata } : asset;
+  const withOrigin: ImageAsset = { ...asset, origin: { assetId: asset.id, url: asset.url, width: asset.width, height: asset.height }, originMap: { scaleX: 1, scaleY: 1, x: 0, y: 0 } };
+  return metadata ? { ...withOrigin, metadata } : withOrigin;
 }
 
 function App() {
@@ -414,13 +374,14 @@ function App() {
   const [languagePreference, setLanguagePreference] = useState<LanguagePreference>(() => getStoredLanguagePreference());
   const [batchProgress, setBatchProgress] = useState<BatchProgress>({ running: false, completed: 0, failed: 0, total: 0 });
   const {
-    assets,
-    activeAssetId,
+    documents,
+    activeDocumentId,
     activeTool,
     history,
-    addAssets,
-    replaceAssets,
-    setActiveAsset,
+    addDocuments,
+    replaceDocuments,
+    updateDocument,
+    setActiveDocument,
     setActiveTool,
     addOperation,
     addHistory,
@@ -431,7 +392,7 @@ function App() {
     undoStack,
     redoStack,
   } = useAppStore();
-  const activeAsset = assets.find((asset) => asset.id === activeAssetId) ?? assets[0] ?? null;
+  const activeDocument = documents.find((document) => document.id === activeDocumentId) ?? documents[0] ?? null;
   const canUndo = undoStack.length > 0;
   const canRedo = redoStack.length > 0;
   const metrics = workspaceMetrics(viewport);
@@ -488,8 +449,9 @@ function App() {
     }
     try {
       const loaded = (await Promise.all(imageFiles.map(fileToAsset))).filter((asset): asset is ImageAsset => Boolean(asset));
+      const docs = loaded.map(documentFromAsset);
       checkpoint();
-      addAssets(loaded);
+      addDocuments(docs);
       setNotice({ type: 'success', text: `${source}导入 ${loaded.length} 张图片，文件仍只在本机处理` });
       if (!activeTool) setActiveTool('resize');
     } catch {
@@ -499,7 +461,7 @@ function App() {
 
   function chooseTool(tool: ToolId) {
     setActiveTool(tool);
-    if (!assets.length) fileInput.current?.click();
+    if (!documents.length) fileInput.current?.click();
   }
 
   function handleLanguageChange(preference: LanguagePreference) {
@@ -514,25 +476,25 @@ function App() {
   }
 
   function clearAssets() {
-    if (!assets.length) return;
+    if (!documents.length) return;
     checkpoint();
-    replaceAssets([]);
+    replaceDocuments([]);
     setActiveTool(null);
     setNotice(null);
   }
 
-  function deleteAsset(id: string) {
-    const target = assets.find((asset) => asset.id === id);
+  function deleteDocument(id: string) {
+    const target = documents.find((document) => document.id === id);
     if (!target) return;
-    const wasActive = activeAsset?.id === id;
-    const targetIndex = assets.findIndex((asset) => asset.id === id);
-    const remaining = assets.filter((asset) => asset.id !== id);
+    const wasActive = activeDocument?.id === id;
+    const targetIndex = documents.findIndex((document) => document.id === id);
+    const remaining = documents.filter((document) => document.id !== id);
     checkpoint();
-    replaceAssets(remaining);
+    replaceDocuments(remaining);
     const nextActive = wasActive
       ? remaining[Math.min(targetIndex, remaining.length - 1)]
-      : remaining.find((asset) => asset.id === activeAsset?.id);
-    setActiveAsset(nextActive?.id ?? null);
+      : remaining.find((document) => document.id === activeDocument?.id);
+    setActiveDocument(nextActive?.id ?? null);
     if (!remaining.length) setActiveTool(null);
     setNotice({ type: 'success', text: `已删除 ${target.name}` });
   }
@@ -542,30 +504,142 @@ function App() {
     setNotice(null);
   }
 
-  async function replaceActive(next: ImageAsset, label: string, detail: string) {
-    if (!activeAsset) return;
+  function commitDocument(next: PhotoDocument, label: string, detail: string) {
     checkpoint();
-    replaceAssets(assets.map((asset) => (asset.id === activeAsset.id ? next : asset)));
-    setActiveAsset(next.id);
+    updateDocument(next.id, () => next);
     addOperation(operation(label, { detail }));
-    addHistory({ name: activeAsset.name, label, detail });
+    addHistory({ name: next.name, label, detail });
     setNotice({ type: 'success', text: `${label}完成` });
   }
 
+  function showIdPhotoStage(subject: ImageAsset, opts: { reset?: boolean } = {}) {
+    if (!activeDocument) return;
+    const firstPush = !activeDocument.edited && activeDocument.layers.every((layer) => !layer.name.startsWith('证件照'));
+    if (firstPush) checkpoint();
+    const stageLayer: Layer = {
+      id: crypto.randomUUID(),
+      name: '证件照 · 实时预览',
+      type: 'image/png',
+      blob: subject.blob,
+      url: subject.url,
+      width: subject.width,
+      height: subject.height,
+      visible: true,
+      offsetX: 0,
+      offsetY: 0,
+    };
+    updateDocument(activeDocument.id, (current) => ({
+      ...current,
+      canvasWidth: subject.width,
+      canvasHeight: subject.height,
+      layers: [...current.layers.map((layer) => ({ ...layer, visible: false })), ...(opts.reset ? [] : current.layers.filter((layer) => layer.name.startsWith('证件照'))), stageLayer],
+      activeLayerId: stageLayer.id,
+    }));
+  }
+
+  async function updateIdPhotoStageLayer(asset: ImageAsset) {
+    if (!activeDocument) return;
+    const existing = [...activeDocument.layers].reverse().find((layer) => layer.name.startsWith('证件照'));
+    if (!existing) { showIdPhotoStage(asset); return; }
+    URL.revokeObjectURL(existing.url);
+    const blob = asset.blob;
+    updateDocument(activeDocument.id, (current) => ({
+      ...current,
+      canvasWidth: asset.width,
+      canvasHeight: asset.height,
+      layers: current.layers.map((layer) => (layer.id === existing.id ? { ...layer, blob, url: URL.createObjectURL(blob), width: asset.width, height: asset.height } : layer)),
+    }));
+  }
+
+  async function applyEffectLayer(label: string, detail: string, run: (flat: ImageAsset) => Promise<ImageAsset>) {
+    if (!activeDocument) return;
+    const flat = await flattenDocument(activeDocument);
+    const result = await run(flat);
+    const layer = layerFromAsset(result, `${label} · ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`);
+    commitDocument({
+      ...activeDocument,
+      edited: true,
+      type: result.type,
+      canvasWidth: result.width,
+      canvasHeight: result.height,
+      layers: [...activeDocument.layers.map((item) => ({ ...item, visible: false })), layer],
+      activeLayerId: layer.id,
+    }, label, detail);
+  }
+
+  async function bakeTopLayer(label: string, detail: string, run: (flat: ImageAsset) => Promise<ImageAsset>) {
+    if (!activeDocument) return;
+    const target = topmostVisibleLayer(activeDocument) ?? activeDocument.layers[activeDocument.layers.length - 1];
+    if (!target) return;
+    const flat = await flattenDocument(activeDocument);
+    const result = await run(flat);
+    const fitted = document.createElement('canvas');
+    fitted.width = target.width;
+    fitted.height = target.height;
+    const context = fitted.getContext('2d');
+    if (!context) throw new Error('当前浏览器无法创建画布');
+    context.drawImage(await loadImage(result.blob), 0, 0, fitted.width, fitted.height);
+    const blob = await canvasToBlob(fitted, 'image/png');
+    URL.revokeObjectURL(target.url);
+    const replaced: Layer = { ...target, blob, url: URL.createObjectURL(blob), type: 'image/png' };
+    commitDocument({ ...activeDocument, edited: true, layers: activeDocument.layers.map((item) => (item.id === target.id ? replaced : item)) }, label, detail);
+  }
+
+  async function bakeCanvasGeometry(kind: 'resize' | 'crop', rect: { x: number; y: number; width: number; height: number }, label: string) {
+    if (!activeDocument) return;
+    const document = activeDocument;
+    const previous = document.originMap ?? { scaleX: 1, scaleY: 1, x: 0, y: 0 };
+    const layers = await Promise.all(document.layers.filter((layer) => layer.visible).map(async (layer) => {
+      const image = await loadImage(layer.blob);
+      const canvas = document2d(rect.width, rect.height);
+      if (kind === 'resize') canvas.context.drawImage(image, 0, 0, rect.width, rect.height);
+      else canvas.context.drawImage(image, layer.offsetX - rect.x, layer.offsetY - rect.y, layer.width, layer.height);
+      const blob = await canvasToBlob(canvas.canvas, 'image/png');
+      return { ...layer, blob, url: URL.createObjectURL(blob), width: rect.width, height: rect.height, offsetX: 0, offsetY: 0 };
+    }));
+    const hidden = document.layers.filter((layer) => !layer.visible).map((layer) => ({ ...layer, offsetX: kind === 'crop' ? layer.offsetX - rect.x : layer.offsetX * (rect.width / document.canvasWidth), offsetY: kind === 'crop' ? layer.offsetY - rect.y : layer.offsetY * (rect.height / document.canvasHeight) }));
+    const originMap = kind === 'crop'
+      ? { scaleX: previous.scaleX, scaleY: previous.scaleY, x: previous.x + previous.scaleX * rect.x, y: previous.y + previous.scaleY * rect.y }
+      : { scaleX: previous.scaleX * document.canvasWidth / rect.width, scaleY: previous.scaleY * document.canvasHeight / rect.height, x: previous.x, y: previous.y };
+    const activeId = layers[0]?.id ?? null;
+    commitDocument({
+      ...document,
+      edited: true,
+      canvasWidth: rect.width,
+      canvasHeight: rect.height,
+      originMap,
+      layers: [...layers, ...hidden],
+      activeLayerId: document.activeLayerId && layers.some((layer) => layer.id === document.activeLayerId) ? document.activeLayerId : activeId,
+    }, label, `${rect.width} × ${rect.height}`);
+  }
+
   async function applyResize(width: number, height: number) {
-    if (!activeAsset || width < 1 || height < 1) return;
-    await replaceActive(await resizeAsset(activeAsset, width, height), '调整尺寸', `${width} × ${height}`);
+    if (!activeDocument || width < 1 || height < 1) return;
+    await bakeCanvasGeometry('resize', { x: 0, y: 0, width, height }, '调整尺寸');
   }
 
   async function applyCrop(values: { x: number; y: number; width: number; height: number }) {
-    if (!activeAsset) return;
-    await replaceActive(await cropAsset(activeAsset, values.x, values.y, values.width, values.height), '裁剪', `${values.width} × ${values.height}`);
+    if (!activeDocument) return;
+    await bakeCanvasGeometry('crop', values, '裁剪');
   }
 
-  async function previewIdPhoto(values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', samples: BackgroundColorSample[], targetColor: [number, number, number] | null, tolerance: number, feather: number) {
-    if (!activeAsset) return null;
-    try {
-      const cropped = await cropAsset(activeAsset, values.x, values.y, values.width, values.height, '证件照裁剪');
+function document2d(width: number, height: number) {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width));
+  canvas.height = Math.max(1, Math.round(height));
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('当前浏览器无法创建画布');
+  return { canvas, context };
+}
+
+async function previewIdPhoto(values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai' | 'none', method: 'solid' | 'connected', samples: BackgroundColorSample[], targetColor: [number, number, number] | null, tolerance: number, feather: number) {
+  if (!activeDocument) return null;
+  try {
+    const flat = await flattenDocument(activeDocument);
+    const cropped = await cropAsset(flat, values.x, values.y, values.width, values.height, '证件照裁剪');
+    if (mattingMode === 'none') {
+      return { subject: cropped, source: cropped, targetColor: null, targetColors: [] } satisfies IdPhotoMattingPreview;
+    }
       const dominantColor = targetColor ?? await estimateDominantColor(cropped);
       const targetColors = samples.length ? samples.map((sample) => sample.color) : [dominantColor];
       const seeds = samples.map(({ x, y }) => ({ x, y }));
@@ -601,72 +675,76 @@ function App() {
     }
   }
 
-  async function applyIdPhoto(preview: IdPhotoMattingPreview, background: string, values: { width: number; height: number }, mattingMode: 'local' | 'ai', clothingLayers: IdPhotoClothingLayer[]) {
-    const next = await composeIdPhotoAsset(preview.subject, background, clothingLayers);
+  async function applyIdPhoto(preview: IdPhotoMattingPreview, background: string, values: { width: number; height: number }, mattingMode: 'local' | 'ai' | 'none', clothingLayers: IdPhotoClothingLayer[], backgroundImage?: ImageAsset) {
+    if (!activeDocument) return;
+    const next = await composeIdPhotoAsset(preview.subject, background, clothingLayers, preview.subjectOffset, backgroundImage, preview.subjectScale);
+    const doc = documentFromAsset(next);
+    doc.name = `证件照-${doc.id.slice(0, 6)}`;
+    doc.origin = undefined;
+    doc.originMap = undefined;
     const clothingDetail = clothingLayers.length ? ` · ${clothingLayers.length} 个服装图层` : '';
-    await replaceActive(next, '生成证件照', `${Math.round(values.width)} × ${Math.round(values.height)} · ${mattingMode === 'ai' ? 'AI 抠图' : '本地抠图'}${clothingDetail} · ${background.toUpperCase()}`);
+    checkpoint();
+    addDocuments([doc]);
+    setActiveDocument(doc.id);
+    addHistory({ name: doc.name, label: '生成证件照', detail: `${Math.round(values.width)} × ${Math.round(values.height)} · ${mattingMode === 'ai' ? 'AI 抠图' : '本地抠图'}${clothingDetail} · ${background.toUpperCase()}` });
+    setNotice({ type: 'success', text: '证件照已生成为新文档' });
   }
 
   async function applyEdit(values: EditValues) {
-    if (!activeAsset) return;
-    await replaceActive(await applyAdjustments(activeAsset, values), '图片编辑', '色彩调整');
+    await applyEffectLayer('图片编辑', '色彩调整', (flat) => applyAdjustments(flat, values));
   }
 
   async function applyMatting(request: LocalBackgroundRemovalOptions) {
-    if (!activeAsset) return;
-    const next = await removeBackgroundAsset(activeAsset, request);
-    await replaceActive(next, '本地抠图', request.method === 'solid' ? '纯色批量抠除' : '联通色块抠除');
+    await applyEffectLayer('本地抠图', request.method === 'solid' ? '纯色批量抠除' : '联通色块抠除', (flat) => removeBackgroundAsset(flat, request));
   }
 
   async function applyAi(request: AiRequest) {
-    if (!activeAsset) return;
     if (request.mode === 'model') {
       try {
-        const next = await aiAdapter.run(activeAsset, { modelId: aiModelId(request.task, request.scale), scale: request.scale });
-        await replaceActive(next, aiTaskLabels[request.task], `本地模型 · ${request.task === 'upscale' ? `${request.scale ?? 2} 倍` : '按模型输出'}`);
+        await applyEffectLayer(aiTaskLabels[request.task], `本地模型 · ${request.task === 'upscale' ? `${request.scale ?? 2} 倍` : '按模型输出'}`, (flat) => aiAdapter.run(flat, { modelId: aiModelId(request.task, request.scale), scale: request.scale, denoise: request.denoise, sharpen: request.sharpen }));
       } catch (error) {
         setNotice({ type: 'warning', text: error instanceof Error ? error.message : 'AI 模型暂不可用，请先准备模型' });
       }
       return;
     }
     try {
-      const next = await applyLocalAiFallback(activeAsset, request.task, request.scale);
-      await replaceActive(next, `${aiTaskLabels[request.task]}（本地降级）`, '未加载模型，使用浏览器处理');
+      await applyEffectLayer(`${aiTaskLabels[request.task]}（本地降级）`, '未加载模型，使用浏览器处理', async (flat) => {
+        let next = await applyLocalAiFallback(flat, request.task, request.scale);
+        next = await applyDetailPass(next, { denoise: request.denoise, sharpen: request.sharpen });
+        return next;
+      });
     } catch (error) {
       setNotice({ type: 'error', text: error instanceof Error ? error.message : '本地降级处理失败' });
     }
   }
 
   async function applyAiBrush(sourceAsset: ImageAsset, stroke: BackgroundBrushStroke) {
-    if (!activeAsset) return;
-    const next = await applyBackgroundBrush(activeAsset, sourceAsset, stroke);
-    await replaceActive(next, stroke.mode === 'erase' ? '抠图擦除' : '抠图还原', `${stroke.mode === 'erase' ? '擦除' : '还原'} · 画笔 ${Math.round(stroke.size)} px`);
+    await bakeTopLayer(stroke.mode === 'erase' ? '抠图擦除' : '抠图还原', `${stroke.mode === 'erase' ? '擦除' : '还原'} · 画笔 ${Math.round(stroke.size)} px`, (flat) => applyBackgroundBrush(flat, sourceAsset, stroke));
   }
 
   async function applyCleanup(stroke: CleanupBrushStroke) {
-    if (!activeAsset) return;
     try {
-      const next = await applyCleanupBrush(activeAsset, stroke);
-      await replaceActive(next, stroke.mode === 'ai' ? 'AI 去水印' : '普通消除笔', `智能填充 · 画笔 ${Math.round(stroke.size)} px`);
+      await bakeTopLayer(stroke.mode === 'ai' ? 'AI 去水印' : '普通消除笔', `智能填充 · 画笔 ${Math.round(stroke.size)} px`, (flat) => applyCleanupBrush(flat, stroke));
     } catch (error) {
       setNotice({ type: 'error', text: error instanceof Error ? error.message : '消除处理失败' });
     }
   }
 
   async function applyWatermarkValue(options: WatermarkOptions) {
-    if (!activeAsset || (options.kind === 'text' && !options.text.trim()) || (options.kind === 'image' && !options.image)) return;
-    await replaceActive(await applyWatermark(activeAsset, options), '添加水印', options.kind === 'text' ? options.text : '图片水印');
+    if ((options.kind === 'text' && !options.text.trim()) || (options.kind === 'image' && !options.image)) return;
+    await applyEffectLayer('添加水印', options.kind === 'text' ? options.text : '图片水印', (flat) => applyWatermark(flat, options));
   }
 
   async function applyMetadataValue(values: Record<string, string>) {
-    if (!activeAsset) return;
-    const metadata = { ...(activeAsset.metadata ?? {}) };
+    if (!activeDocument) return;
+    const flat = await flattenDocument(activeDocument);
+    const metadata = { ...(flat.metadata ?? {}) };
     Object.entries(values).forEach(([key, value]) => {
       if (value.trim()) metadata[key] = value.trim();
       else delete metadata[key];
     });
-    const format = activeAsset.type === 'image/jpeg' || activeAsset.type === 'image/png' ? activeAsset.type : 'image/jpeg';
-    const blob = await encodeAsset(asProcessedAsset(activeAsset), {
+    const format = activeDocument.type === 'image/jpeg' || activeDocument.type === 'image/png' ? activeDocument.type : 'image/jpeg';
+    const blob = await encodeAsset(asProcessedAsset(flat), {
       format,
       quality: 0.94,
       background: '#ffffff',
@@ -674,109 +752,121 @@ function App() {
       preserveMetadata: false,
     });
     const updatedBlob = await updateImageMetadata(blob, metadata);
-    const next = await createAssetFromBlob(updatedBlob, `${fileNameWithoutExtension(activeAsset.name)}.${format === 'image/jpeg' ? 'jpg' : 'png'}`);
-    await replaceActive({ ...next, metadata }, '修改照片信息', '已写入常见照片信息');
+    await bakeTopLayer('修改照片信息', '已写入常见照片信息', async () => createAssetFromBlob(updatedBlob, activeDocument.name));
   }
 
   async function clearMetadataValue() {
-    if (!activeAsset) return;
-    const format = activeAsset.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
-    const blob = await encodeAsset(asProcessedAsset(activeAsset), {
+    if (!activeDocument) return;
+    const flat = await flattenDocument(activeDocument);
+    const format = activeDocument.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+    const blob = await encodeAsset(asProcessedAsset(flat), {
       format,
       quality: 0.94,
       background: '#ffffff',
       preserveTransparency: format !== 'image/jpeg',
       preserveMetadata: false,
     });
-    const next = await createAssetFromBlob(blob, `${fileNameWithoutExtension(activeAsset.name)}.${format === 'image/jpeg' ? 'jpg' : 'png'}`);
-    await replaceActive(next, '清除照片数据', '已移除 EXIF 与 GPS');
+    await bakeTopLayer('清除照片数据', '已移除 EXIF 与 GPS', () => createAssetFromBlob(blob, activeDocument.name));
   }
 
   async function applyEncoding(format: ExportFormat, quality: number, background: string) {
-    if (!activeAsset) return;
-    const blob = await encodeAsset(asProcessedAsset(activeAsset), {
+    if (!activeDocument) return;
+    const flat = await flattenDocument(activeDocument);
+    const blob = await encodeAsset(asProcessedAsset(flat), {
       format,
       quality,
       background,
       preserveTransparency: format !== 'image/jpeg',
       preserveMetadata: false,
     });
-    const next = await createAssetFromBlob(blob, `${fileNameWithoutExtension(activeAsset.name)}.${format.split('/')[1].replace('jpeg', 'jpg')}`);
-    await replaceActive(next, format === 'image/jpeg' ? '压缩图片' : '转换格式', `${format} · ${formatBytes(blob.size)}`);
+    await bakeTopLayer(format === 'image/jpeg' ? '压缩图片' : '转换格式', `${format} · ${formatBytes(blob.size)}`, () => createAssetFromBlob(blob, activeDocument.name));
   }
 
   async function applySplit(direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines: SplitLine[] = []) {
-    if (!activeAsset) return;
-    const pieces = await splitAsset(activeAsset, rows, columns, direction, lines);
-    checkpoint();
-    addAssets(pieces);
-    setActiveAsset(pieces[0]?.id ?? activeAsset.id);
-    addHistory({ name: activeAsset.name, label: '分割图片', detail: `${pieces.length} 张` });
-    setNotice({ type: 'success', text: `已生成 ${pieces.length} 张切图` });
+    if (!activeDocument) return;
+    const flat = await flattenDocument(activeDocument);
+    const pieces = await splitAsset(flat, rows, columns, direction, lines);
+    const layers = pieces.map((piece, index) => ({ ...layerFromAsset(piece, `${activeDocument.name}-第${index + 1}层`), visible: index === 0 }));
+    commitDocument({
+      ...activeDocument,
+      edited: true,
+      layers,
+      activeLayerId: layers[0]?.id ?? null,
+    }, '分割图片', `切为 ${layers.length} 个图层`);
+    setNotice({ type: 'success', text: `已生成 ${layers.length} 个图层，可在图层面板切换显隐` });
   }
 
   async function applyMerge(layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) {
-    if (assets.length < 2) {
+    if (documents.length < 2) {
       setNotice({ type: 'warning', text: '至少导入两张图片才能拼图' });
       return;
     }
-    const merged = await createCollage(assets, layout, gap, background);
+    const sources = await Promise.all(documents.map((document) => flattenDocument(document)));
+    const merged = await createCollage(sources, layout, gap, background);
+    const doc = documentFromAsset(merged);
+    doc.name = `拼图-${new Date().toISOString().slice(0, 10)}`;
+    doc.origin = undefined;
+    doc.originMap = undefined;
     checkpoint();
-    addAssets([merged]);
-    setActiveAsset(merged.id);
-    addHistory({ name: merged.name, label: '图片拼图', detail: `${assets.length} 张图片` });
-    setNotice({ type: 'success', text: '拼图已生成，可继续编辑或导出' });
+    addDocuments([doc]);
+    setActiveDocument(doc.id);
+    addHistory({ name: doc.name, label: '图片拼图', detail: `${sources.length} 张图片` });
+    setNotice({ type: 'success', text: '拼图已生成为新文档，可继续编辑或导出' });
   }
 
   async function exportActive(format: ExportFormat = 'image/png', quality = 0.88) {
-    if (!activeAsset) return;
-    await exportImage(asProcessedAsset(activeAsset), {
+    if (!activeDocument) return;
+    const flat = await flattenDocument(activeDocument);
+    await exportImage(asProcessedAsset(flat), {
       format,
       quality,
       background: '#ffffff',
       preserveTransparency: format !== 'image/jpeg',
       preserveMetadata: false,
     });
-    setNotice({ type: 'success', text: `已下载 ${activeAsset.name}` });
+    setNotice({ type: 'success', text: `已下载 ${activeDocument.name}` });
   }
 
   async function exportAll() {
-    for (const asset of assets) {
-      await exportImage(asProcessedAsset(asset), {
-        format: asset.type === 'image/jpeg' ? 'image/jpeg' : 'image/png',
+    for (const document of documents) {
+      const flat = await flattenDocument(document);
+      await exportImage(asProcessedAsset(flat), {
+        format: document.type === 'image/jpeg' ? 'image/jpeg' : 'image/png',
         quality: 0.88,
         background: '#ffffff',
-        preserveTransparency: asset.type !== 'image/jpeg',
+        preserveTransparency: document.type !== 'image/jpeg',
         preserveMetadata: false,
       });
       await new Promise((resolve) => window.setTimeout(resolve, 120));
     }
-    setNotice({ type: 'success', text: `已准备下载 ${assets.length} 张图片` });
+    setNotice({ type: 'success', text: `已准备下载 ${documents.length} 个文档` });
   }
 
   async function exportGif() {
-    if (assets.length < 2) {
+    if (documents.length < 2) {
       setNotice({ type: 'warning', text: 'GIF 合成至少需要两张图片' });
       return;
     }
-    const blob = await encodeGifFrames(assets, 8);
+    const frames = await Promise.all(documents.map((document) => flattenDocument(document)));
+    const blob = await encodeGifFrames(frames, 8);
     downloadBlob(blob, 'alun-image-animation.gif');
     setNotice({ type: 'success', text: 'GIF 已导出' });
   }
 
   async function applyBatch(options: BatchOptions) {
-    if (!assets.length || batchProgress.running) return;
-    const nextAssets: ImageAsset[] = [];
+    if (!documents.length || batchProgress.running) return;
+    const nextDocuments: PhotoDocument[] = [];
     let failed = 0;
-    setBatchProgress({ running: true, completed: 0, failed: 0, total: assets.length });
-    for (let index = 0; index < assets.length; index += 1) {
-      const asset = assets[index];
-      setBatchProgress({ running: true, completed: index, failed, total: assets.length, currentName: asset.name });
+    setBatchProgress({ running: true, completed: 0, failed: 0, total: documents.length });
+    for (let index = 0; index < documents.length; index += 1) {
+      const document = documents[index];
+      setBatchProgress({ running: true, completed: index, failed, total: documents.length, currentName: document.name });
       try {
+        const flat = await flattenDocument(document);
         let next: ImageAsset;
         if (options.kind === 'matting') {
-          const samples = await estimateBackgroundSamples(asset, options.sampling);
-          next = await removeBackgroundAsset(asset, {
+          const samples = await estimateBackgroundSamples(flat, options.sampling);
+          next = await removeBackgroundAsset(flat, {
             method: samples.method,
             targetColor: samples.colors[0],
             targetColors: samples.colors,
@@ -787,42 +877,51 @@ function App() {
             feather: options.feather,
           });
         } else if (options.kind === 'crop') {
-          const rect = alignedCropRect(asset.width, asset.height, options.width, options.height, options.alignment);
-          next = await cropAsset(asset, rect.x, rect.y, rect.width, rect.height, '批量裁剪');
+          const rect = alignedCropRect(flat.width, flat.height, options.width, options.height, options.alignment);
+          next = await cropAsset(flat, rect.x, rect.y, rect.width, rect.height, '批量裁剪');
         } else if (options.kind === 'upscale') {
           try {
-            next = await aiAdapter.run(asset, { modelId: aiModelId('upscale', options.scale), scale: options.scale });
+            next = await aiAdapter.run(flat, { modelId: aiModelId('upscale', options.scale), scale: options.scale });
           } catch {
-            next = await applyLocalAiFallback(asset, 'upscale', options.scale);
+            next = await applyLocalAiFallback(flat, 'upscale', options.scale);
           }
         } else if (options.kind === 'rename') {
-          const extension = asset.name.match(/\.([^.]+)$/)?.[1] ?? asset.type.split('/')[1].replace('jpeg', 'jpg');
           const sequence = String(options.start + index).padStart(options.digits, '0');
-          const name = `${options.template.replaceAll('{name}', fileNameWithoutExtension(asset.name)).replaceAll('{n}', sequence)}.${extension}`;
-          next = { ...asset, id: crypto.randomUUID(), name };
+          const name = `${options.template.replaceAll('{name}', fileNameWithoutExtension(document.name)).replaceAll('{n}', sequence)}.png`;
+          nextDocuments.push({ ...document, name });
+          setBatchProgress({ running: true, completed: index + 1, failed, total: documents.length, currentName: document.name });
+          continue;
         } else {
-          const blob = await encodeAsset(asProcessedAsset(asset), { format: options.format, quality: options.quality, background: '#ffffff', preserveTransparency: options.format !== 'image/jpeg', preserveMetadata: false });
-          next = await createAssetFromBlob(blob, `${fileNameWithoutExtension(asset.name)}.${options.format === 'image/jpeg' ? 'jpg' : 'webp'}`);
+          const blob = await encodeAsset(asProcessedAsset(flat), { format: options.format, quality: options.quality, background: '#ffffff', preserveTransparency: options.format !== 'image/jpeg', preserveMetadata: false });
+          next = await createAssetFromBlob(blob, document.name);
         }
-        nextAssets.push(next);
+        const layer = layerFromAsset(next, `${document.name} · 效果`);
+        nextDocuments.push({
+          ...document,
+          edited: true,
+          canvasWidth: next.width,
+          canvasHeight: next.height,
+          layers: [...document.layers.map((item) => ({ ...item, visible: false })), layer],
+          activeLayerId: layer.id,
+        });
       } catch {
         failed += 1;
-        nextAssets.push(asset);
+        nextDocuments.push(document);
       }
-      setBatchProgress({ running: true, completed: index + 1, failed, total: assets.length, currentName: asset.name });
+      setBatchProgress({ running: true, completed: index + 1, failed, total: documents.length, currentName: document.name });
     }
     checkpoint();
-    replaceAssets(nextAssets);
+    replaceDocuments(nextDocuments);
     const labels: Record<BatchOptions['kind'], string> = { matting: '批量抠图', crop: '批量裁剪', upscale: '批量超分', rename: '批量改名', compress: '批量压缩' };
-    addHistory({ name: `${assets.length} 张图片`, label: labels[options.kind], detail: failed ? `${assets.length - failed} 成功 · ${failed} 失败` : '全部成功' });
-    setBatchProgress({ running: false, completed: assets.length, failed, total: assets.length });
-    setNotice({ type: failed ? 'warning' : 'success', text: failed ? `批量处理完成：${assets.length - failed} 张成功，${failed} 张保留原图` : `批量处理完成，共 ${nextAssets.length} 张` });
+    addHistory({ name: `${documents.length} 张图片`, label: labels[options.kind], detail: failed ? `${documents.length - failed} 成功 · ${failed} 失败` : '全部成功' });
+    setBatchProgress({ running: false, completed: documents.length, failed, total: documents.length });
+    setNotice({ type: failed ? 'warning' : 'success', text: failed ? `批量处理完成：${documents.length - failed} 张成功，${failed} 张保留原图` : `批量处理完成，共 ${nextDocuments.length} 个文档` });
   }
 
-  const pageClass = `app-shell ${theme === 'dark' ? 'theme-dark' : ''} ${assets.length ? 'has-workspace' : ''}`;
+  const pageClass = `app-shell ${theme === 'dark' ? 'theme-dark' : ''} ${documents.length ? 'has-workspace' : ''}`;
 
   return (
-    <div className={pageClass} style={assets.length ? workspaceStyle : undefined}>
+    <div className={pageClass} style={documents.length ? workspaceStyle : undefined}>
       <input ref={fileInput} className="visually-hidden" type="file" accept="image/*" multiple onChange={(event) => void handleFiles(Array.from(event.target.files ?? []))} />
       <input ref={folderInput} className="visually-hidden" type="file" accept="image/*" multiple {...({ webkitdirectory: '' } as Record<string, string>)} onChange={(event) => void handleFiles(Array.from(event.target.files ?? []), '文件夹')} />
       <header className="topbar">
@@ -843,7 +942,7 @@ function App() {
       {showSettings && <SettingsPopover languagePreference={languagePreference} onLanguageChange={handleLanguageChange} onClose={() => setShowSettings(false)} />}
       {notice && <NoticeBanner notice={notice} onClose={() => setNotice(null)} />}
 
-      {!assets.length ? (
+      {!documents.length ? (
         <HomeScreen
           tools={tools}
           onChooseTool={chooseTool}
@@ -857,10 +956,12 @@ function App() {
         />
       ) : (
         <Workspace
-          assets={assets}
-          activeAsset={activeAsset}
+          documents={documents}
+          activeDocument={activeDocument}
           activeTool={activeTool ?? 'resize'}
-          onSelectAsset={setActiveAsset}
+          onSelectDocument={setActiveDocument}
+          onRenameDocument={(id, name) => updateDocument(id, (document) => ({ ...document, name }))}
+          onUpdateDocument={(updater) => { if (activeDocument) updateDocument(activeDocument.id, updater); }}
           onSelectTool={openTool}
           onAddFiles={() => fileInput.current?.click()}
           onClear={clearAssets}
@@ -869,6 +970,8 @@ function App() {
           onResize={applyResize}
           onCrop={applyCrop}
           onIdPhotoPreview={previewIdPhoto}
+          onIdPhotoStage={showIdPhotoStage}
+          onIdPhotoStageUpdate={updateIdPhotoStageLayer}
           onIdPhotoBrush={brushIdPhoto}
           onIdPhotoClothing={loadIdPhotoClothing}
           onIdPhoto={applyIdPhoto}
@@ -886,7 +989,7 @@ function App() {
           onExportGif={exportGif}
           onBatch={applyBatch}
           batchProgress={batchProgress}
-          onDeleteAsset={deleteAsset}
+          onDeleteAsset={deleteDocument}
           onUndo={() => { undo(); setNotice({ type: 'success', text: '已撤销上一步操作' }); }}
           onRedo={() => { redo(); setNotice({ type: 'success', text: '已重做上一步操作' }); }}
           canUndo={canUndo}
@@ -972,10 +1075,14 @@ function ToolCard({ tool, onClick }: { tool: ToolDefinition; onClick: () => void
 }
 
 function Workspace({
-  assets,
-  activeAsset,
+  documents,
+  activeDocument,
   activeTool,
-  onSelectAsset,
+  onSelectDocument,
+  onRenameDocument,
+  onUpdateDocument,
+  onIdPhotoStage,
+  onIdPhotoStageUpdate,
   onSelectTool,
   onAddFiles,
   onClear,
@@ -1008,10 +1115,12 @@ function Workspace({
   canRedo,
   setNotice,
 }: {
-  assets: ImageAsset[];
-  activeAsset: ImageAsset | null;
+  documents: PhotoDocument[];
+  activeDocument: PhotoDocument | null;
   activeTool: ToolId;
-  onSelectAsset: (id: string) => void;
+  onSelectDocument: (id: string) => void;
+  onRenameDocument: (id: string, name: string) => void;
+  onUpdateDocument: (updater: (document: PhotoDocument) => PhotoDocument) => void;
   onSelectTool: (tool: ToolId) => void;
   onAddFiles: () => void;
   onClear: () => void;
@@ -1019,10 +1128,10 @@ function Workspace({
   onExportAll: () => void;
   onResize: (width: number, height: number) => Promise<void>;
   onCrop: (values: { x: number; y: number; width: number; height: number }) => Promise<void>;
-  onIdPhotoPreview: (values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', samples: BackgroundColorSample[], targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>;
+  onIdPhotoPreview: (values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai' | 'none', method: 'solid' | 'connected', samples: BackgroundColorSample[], targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>;
   onIdPhotoBrush: (preview: IdPhotoMattingPreview, stroke: BackgroundBrushStroke) => Promise<IdPhotoMattingPreview>;
   onIdPhotoClothing: (source: File | string, removeBackground: boolean) => Promise<ImageAsset | null>;
-  onIdPhoto: (preview: IdPhotoMattingPreview, background: string, values: { width: number; height: number }, mattingMode: 'local' | 'ai', clothingLayers: IdPhotoClothingLayer[]) => Promise<void>;
+  onIdPhoto: (preview: IdPhotoMattingPreview, background: string, values: { width: number; height: number }, mattingMode: 'local' | 'ai' | 'none', clothingLayers: IdPhotoClothingLayer[], backgroundImage?: ImageAsset) => Promise<void>;
   onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
@@ -1035,6 +1144,8 @@ function Workspace({
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
   onExportGif: () => Promise<void>;
+  onIdPhotoStage: (subject: ImageAsset, opts?: { reset?: boolean }) => void;
+  onIdPhotoStageUpdate: (asset: ImageAsset) => Promise<void> | void;
   onBatch: (options: BatchOptions) => Promise<void>;
   batchProgress: BatchProgress;
   onDeleteAsset: (id: string) => void;
@@ -1046,34 +1157,114 @@ function Workspace({
 }) {
   const [overlayHost, setOverlayHost] = useState<HTMLDivElement | null>(null);
   const [editPreview, setEditPreview] = useState<EditValues>(defaultEditValues);
+  const [compareLocked, setCompareLocked] = useState(false);
+  const [comparePeeking, setComparePeeking] = useState(false);
+  const [viewAsset, setViewAsset] = useState<ImageAsset | null>(null);
+  const [renamingDocument, setRenamingDocument] = useState(false);
+  const [documentNameDraft, setDocumentNameDraft] = useState('');
+  const comparePressStartRef = useRef(0);
   const activeToolDefinition = tools.find((tool) => tool.id === activeTool) ?? tools[0];
   const Icon = activeToolDefinition.icon;
-  useEffect(() => setEditPreview(defaultEditValues), [activeAsset?.id, activeTool]);
+  useEffect(() => {
+    setEditPreview(defaultEditValues);
+    setCompareLocked(false);
+    setComparePeeking(false);
+    setRenamingDocument(false);
+  }, [activeDocument?.id, activeTool]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!activeDocument) { setViewAsset(null); return; }
+    void flattenDocument(activeDocument).then((flat) => { if (!cancelled) setViewAsset(flat); }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [activeDocument]);
+  const originReady = Boolean(activeDocument?.edited && activeDocument.origin && activeDocument.originMap);
+  const compareActive = (comparePeeking || compareLocked) && originReady;
+  const compare = compareActive && activeDocument?.origin && activeDocument.originMap ? { url: activeDocument.origin.url, width: activeDocument.origin.width, height: activeDocument.origin.height, map: activeDocument.originMap } : null;
+
+  function endComparePress(withToggle: boolean) {
+    setComparePeeking(false);
+    if (withToggle && performance.now() - comparePressStartRef.current < 250) setCompareLocked((value) => !value);
+  }
+  function startDocumentRename() {
+    if (!activeDocument) return;
+    setDocumentNameDraft(activeDocument.name);
+    setRenamingDocument(true);
+  }
+  function commitDocumentRename() {
+    if (activeDocument && documentNameDraft.trim()) onRenameDocument(activeDocument.id, documentNameDraft.trim());
+    setRenamingDocument(false);
+  }
+  const canvasAspectPortrait = Boolean(activeDocument && activeDocument.canvasHeight > activeDocument.canvasWidth);
   return (
     <EditorOverlayContext.Provider value={overlayHost}>
     <main className="workspace-page">
       <div className="workspace-breadcrumb"><button className="back-button" onClick={onClear}><ArrowLeft size={15} /> 工具箱</button><span>/</span><span>{activeToolDefinition.label}</span><div className="workspace-actions"><button className="secondary-button" onClick={onAddFiles}><Plus size={16} /> 添加图片</button><button className="secondary-button" onClick={onExportAll}><Download size={16} /> 全部下载</button><button className="primary-button compact" onClick={onExport}><FileDown size={16} /> 导出当前</button></div></div>
-      <div className="asset-strip"><div className="asset-strip-label"><span className="eyebrow">WORKSPACE</span><strong>{assets.length} 张图片</strong></div><div className="asset-thumbs">{assets.map((asset, index) => <div className="asset-thumb-wrap" key={asset.id}><button className={`asset-thumb ${asset.id === activeAsset?.id ? 'is-active' : ''}`} aria-label={`选中 ${asset.name}`} aria-pressed={asset.id === activeAsset?.id} onClick={() => onSelectAsset(asset.id)}><img src={asset.url} alt={asset.name} /><span>{index + 1}</span></button><button className="asset-delete-button" title={`删除 ${asset.name}`} aria-label={`删除 ${asset.name}`} onClick={() => onDeleteAsset(asset.id)}><X size={11} /></button></div>)}<button className="add-thumb" title="添加图片" aria-label="添加图片" onClick={onAddFiles}><Plus size={17} /></button></div><div className="asset-total">总计 {formatBytes(assets.reduce((sum, asset) => sum + asset.size, 0))}</div></div>
+      <div className="asset-strip"><div className="asset-strip-label"><span className="eyebrow">WORKSPACE</span><strong>{documents.length} 个文档</strong></div><div className="asset-thumbs">{documents.map((document, index) => { const top = [...document.layers].reverse().find((layer) => layer.visible) ?? document.layers[0]; return <div className="asset-thumb-wrap" key={document.id}><button className={`asset-thumb ${document.id === activeDocument?.id ? 'is-active' : ''}`} aria-label={`选中 ${document.name}`} aria-pressed={document.id === activeDocument?.id} onClick={() => onSelectDocument(document.id)}><img src={top?.url} alt={document.name} /><span>{index + 1}</span></button><button className="asset-delete-button" title={`删除 ${document.name}`} aria-label={`删除 ${document.name}`} onClick={() => onDeleteAsset(document.id)}><X size={11} /></button></div>; })}<button className="add-thumb" title="添加图片" aria-label="添加图片" onClick={onAddFiles}><Plus size={17} /></button></div><div className="asset-total">{activeDocument?.edited ? '已编辑' : '未编辑'}</div></div>
       <div className="workspace-layout">
         <aside className="tool-sidebar"><div className="sidebar-title"><PanelLeft size={15} /><span>工具</span></div><div className="sidebar-list">{tools.map((tool) => { const ToolIcon = tool.icon; return <button className={`sidebar-tool ${activeTool === tool.id ? 'is-active' : ''}`} data-tool-id={tool.id} key={tool.id} onClick={() => onSelectTool(tool.id)} title={tool.description}><ToolIcon size={17} /><span>{tool.label}</span>{activeTool === tool.id && <span className="active-bar" />}</button>; })}</div><div className="sidebar-bottom"><ShieldCheck size={16} /><small>本地模式<br />Local only</small></div></aside>
-        <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 直接编辑</span><span>{activeAsset ? `${activeAsset.width} × ${activeAsset.height}` : '未选择图片'}</span></div><div className={`preview-stage ${activeAsset && activeAsset.height > activeAsset.width ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeAsset ? <PreviewImage asset={activeAsset} editValues={activeTool === 'edit' ? editPreview : undefined} onOverlayHost={setOverlayHost} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeAsset?.name ?? '未选择文件'}</strong><small>{activeAsset ? `${formatBytes(activeAsset.size)} · ${activeAsset.type.replace('image/', '').toUpperCase()}` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeAsset && <button className="icon-button" title="删除当前图片" aria-label="删除当前图片" onClick={() => onDeleteAsset(activeAsset.id)}><Trash2 size={16} /></button>}</div></div></section>
-        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div><div className="control-scroll"><ToolPanel tool={activeTool} asset={activeAsset} assets={assets} onResize={onResize} onCrop={onCrop} onIdPhotoPreview={onIdPhotoPreview} onIdPhotoBrush={onIdPhotoBrush} onIdPhotoClothing={onIdPhotoClothing} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onEditPreview={setEditPreview} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onCleanup={onCleanup} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} batchProgress={batchProgress} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
+        <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 直接编辑</span>{renamingDocument && activeDocument ? <span className="doc-rename"><input autoFocus value={documentNameDraft} onChange={(event) => setDocumentNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') commitDocumentRename(); if (event.key === 'Escape') setRenamingDocument(false); }} /><button type="button" className="text-button" onClick={commitDocumentRename}>确定</button><button type="button" className="text-button" onClick={() => setRenamingDocument(false)}>取消</button></span> : <button type="button" className="doc-name-button" title="点击重命名文档（同时是导出文件名）" onClick={startDocumentRename}>{activeDocument?.name ?? '未选择文档'}<Pencil size={12} /></button>}<span>{activeDocument ? `${activeDocument.canvasWidth} × ${activeDocument.canvasHeight}` : ''}</span></div><div className={`preview-stage ${canvasAspectPortrait ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeDocument ? <PreviewImage document={activeDocument} editValues={activeTool === 'edit' ? editPreview : undefined} compare={compare} onOverlayHost={setOverlayHost} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}{originReady && <button type="button" className={`preview-compare-pill ${compareActive ? 'is-engaged' : ''}`} aria-pressed={compareLocked} onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); comparePressStartRef.current = performance.now(); setComparePeeking(true); }} onPointerUp={() => endComparePress(true)} onPointerCancel={() => endComparePress(false)}><ArrowRightLeft size={13} /><span>{compareActive ? '原图对比中 · 点按退出' : '按住看原图'}</span></button>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeDocument?.name ?? '未选择文件'}</strong><small>{activeDocument ? `${activeDocument.layers.filter((layer) => layer.visible).length}/${activeDocument.layers.length} 图层可见` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeDocument && <button className="icon-button" title="删除当前文档" aria-label="删除当前文档" onClick={() => onDeleteAsset(activeDocument.id)}><Trash2 size={16} /></button>}</div></div></section>
+        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div>{activeDocument && <LayerPanel document={activeDocument} onSelectLayer={(layerId) => onUpdateDocument((current) => ({ ...current, activeLayerId: layerId }))} onToggleLayer={(layerId) => onUpdateDocument((current) => ({ ...current, edited: true, layers: current.layers.map((layer) => (layer.id === layerId ? { ...layer, visible: !layer.visible } : layer)) }))} onRenameLayer={(layerId, name) => onUpdateDocument((current) => ({ ...current, layers: current.layers.map((layer) => (layer.id === layerId ? { ...layer, name } : layer)) }))} onDeleteLayer={(layerId) => onUpdateDocument((current) => { const layers = current.layers.filter((layer) => layer.id !== layerId); return { ...current, layers, activeLayerId: current.activeLayerId === layerId ? layers[0]?.id ?? null : current.activeLayerId }; })} onExportLayer={async (layerId) => { const layer = activeDocument.layers.find((item) => item.id === layerId); if (!layer) return; await exportImage(asProcessedAsset({ id: layer.id, name: layer.name, type: layer.type, size: layer.blob.size, width: layer.width, height: layer.height, originalWidth: layer.width, originalHeight: layer.height, blob: layer.blob, url: layer.url }), { format: 'image/png', quality: 0.92, background: '#ffffff', preserveTransparency: true, preserveMetadata: false }); setNotice({ type: 'success', text: `已下载图层 ${layer.name}` }); }} />}<div className="control-scroll"><ToolPanel tool={activeTool} asset={viewAsset} onIdPhotoStage={onIdPhotoStage} onIdPhotoStageUpdate={onIdPhotoStageUpdate} onResize={onResize} onCrop={onCrop} onIdPhotoPreview={onIdPhotoPreview} onIdPhotoBrush={onIdPhotoBrush} onIdPhotoClothing={onIdPhotoClothing} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onEditPreview={setEditPreview} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onCleanup={onCleanup} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} batchProgress={batchProgress} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
       </div>
     </main>
     </EditorOverlayContext.Provider>
   );
 }
 
-function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, onIdPhotoBrush, onIdPhotoClothing, onIdPhoto, onSplit, onMerge, onEncode, onEdit, onEditPreview, onMattingApply, onMattingBrushApply, onAiApply, onCleanup, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, batchProgress, setNotice }: {
+function LayerPanel({ document: doc, onSelectLayer, onToggleLayer, onRenameLayer, onDeleteLayer, onExportLayer }: {
+  document: PhotoDocument;
+  onSelectLayer: (layerId: string) => void;
+  onToggleLayer: (layerId: string) => void;
+  onRenameLayer: (layerId: string, name: string) => void;
+  onDeleteLayer: (layerId: string) => void;
+  onExportLayer: (layerId: string) => Promise<void>;
+}) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const rows = [...doc.layers].reverse();
+  return (
+    <div className="layer-panel">
+      <div className="layer-panel-head"><Layers3 size={14} /><span>图层</span><small>{doc.layers.filter((layer) => layer.visible).length}/{doc.layers.length}</small></div>
+      <div className="layer-rows">
+        {rows.map((layer) => (
+          <div key={layer.id} className={`layer-row ${doc.activeLayerId === layer.id ? 'is-active' : ''} ${layer.visible ? '' : 'is-hidden'}`}>
+            <button type="button" className="layer-thumb" onClick={() => onSelectLayer(layer.id)} title="设为激活图层"><img src={layer.url} alt={layer.name} draggable={false} /></button>
+            {editingId === layer.id ? (
+              <input
+                autoFocus
+                className="layer-name-input"
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && draft.trim()) { onRenameLayer(layer.id, draft.trim()); setEditingId(null); }
+                  if (event.key === 'Escape') setEditingId(null);
+                }}
+                onBlur={() => { if (draft.trim()) onRenameLayer(layer.id, draft.trim()); setEditingId(null); }}
+              />
+            ) : (
+              <button type="button" className="layer-name" title="双击重命名" onDoubleClick={() => { setDraft(layer.name); setEditingId(layer.id); }} onClick={() => onSelectLayer(layer.id)}>
+                <strong>{layer.name}</strong>
+                <small>{layer.width} × {layer.height}</small>
+              </button>
+            )}
+            <button type="button" className="layer-action" title={layer.visible ? '隐藏图层' : '显示图层'} aria-label={layer.visible ? '隐藏图层' : '显示图层'} onClick={() => onToggleLayer(layer.id)}>{layer.visible ? <Eye size={14} /> : <EyeOff size={14} />}</button>
+            <button type="button" className="layer-action" title="单独导出此层" aria-label="单独导出此层" onClick={() => void onExportLayer(layer.id)}><Download size={13} /></button>
+            <button type="button" className="layer-action danger" title="删除图层" aria-label="删除图层" onClick={() => onDeleteLayer(layer.id)}><Trash2 size={13} /></button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ToolPanel({ tool, asset, onIdPhotoStage, onIdPhotoStageUpdate, onResize, onCrop, onIdPhotoPreview, onIdPhotoBrush, onIdPhotoClothing, onIdPhoto, onSplit, onMerge, onEncode, onEdit, onEditPreview, onMattingApply, onMattingBrushApply, onAiApply, onCleanup, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, batchProgress, setNotice }: {
   tool: ToolId;
   asset: ImageAsset | null;
-  assets: ImageAsset[];
   onResize: (width: number, height: number) => Promise<void>;
   onCrop: (values: { x: number; y: number; width: number; height: number }) => Promise<void>;
-  onIdPhotoPreview: (values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai', method: 'solid' | 'connected', samples: BackgroundColorSample[], targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>;
+  onIdPhotoPreview: (values: { x: number; y: number; width: number; height: number }, mattingMode: 'local' | 'ai' | 'none', method: 'solid' | 'connected', samples: BackgroundColorSample[], targetColor: [number, number, number] | null, tolerance: number, feather: number) => Promise<IdPhotoMattingPreview | null>;
   onIdPhotoBrush: (preview: IdPhotoMattingPreview, stroke: BackgroundBrushStroke) => Promise<IdPhotoMattingPreview>;
   onIdPhotoClothing: (source: File | string, removeBackground: boolean) => Promise<ImageAsset | null>;
-  onIdPhoto: (preview: IdPhotoMattingPreview, background: string, values: { width: number; height: number }, mattingMode: 'local' | 'ai', clothingLayers: IdPhotoClothingLayer[]) => Promise<void>;
+  onIdPhoto: (preview: IdPhotoMattingPreview, background: string, values: { width: number; height: number }, mattingMode: 'local' | 'ai' | 'none', clothingLayers: IdPhotoClothingLayer[], backgroundImage?: ImageAsset) => Promise<void>;
   onSplit: (direction: 'horizontal' | 'vertical' | 'grid', rows: number, columns: number, lines?: SplitLine[]) => Promise<void>;
   onMerge: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>;
   onEncode: (format: ExportFormat, quality: number, background: string) => Promise<void>;
@@ -1087,6 +1278,8 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, on
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
   onExportGif: () => Promise<void>;
+  onIdPhotoStage: (subject: ImageAsset, opts?: { reset?: boolean }) => void;
+  onIdPhotoStageUpdate: (asset: ImageAsset) => Promise<void> | void;
   onBatch: (options: BatchOptions) => Promise<void>;
   batchProgress: BatchProgress;
   setNotice: (notice: Notice) => void;
@@ -1096,7 +1289,7 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, on
     case 'resize': return <ResizePanel asset={asset} onApply={onResize} />;
     case 'crop': return <CropPanel asset={asset} onApply={onCrop} />;
     case 'split': return <SplitPanel asset={asset} onApply={onSplit} />;
-    case 'merge': return <MergePanel assets={assets} onApply={onMerge} setNotice={setNotice} />;
+    case 'merge': return <MergePanel count={0} onApply={onMerge} setNotice={setNotice} />;
     case 'compress': return <EncodePanel mode="compress" asset={asset} onApply={onEncode} />;
     case 'convert': return <EncodePanel mode="convert" asset={asset} onApply={onEncode} />;
     case 'matting': return <MattingPanel asset={asset} onApply={onMattingApply} onBrushApply={onMattingBrushApply} onAiApply={onAiApply} setNotice={setNotice} />;
@@ -1105,9 +1298,9 @@ function ToolPanel({ tool, asset, assets, onResize, onCrop, onIdPhotoPreview, on
     case 'edit': return <EditPanel onApply={onEdit} onPreview={onEditPreview} />;
     case 'watermark': return <WatermarkPanel asset={asset} onApply={onWatermark} />;
     case 'metadata': return <MetadataPanel asset={asset} onApply={onMetadata} onClear={onClearMetadata} setNotice={setNotice} />;
-    case 'batch': return <BatchPanel count={assets.length} progress={batchProgress} onApply={onBatch} />;
-    case 'gif': return <GifPanel count={assets.length} onApply={onExportGif} />;
-    case 'id-photo': return <IdPhotoPanel asset={asset} onPreview={onIdPhotoPreview} onBrushApply={onIdPhotoBrush} onLoadClothing={onIdPhotoClothing} onApply={onIdPhoto} />;
+    case 'batch': return <BatchPanel count={1} progress={batchProgress} onApply={onBatch} />;
+    case 'gif': return <GifPanel count={0} onApply={onExportGif} />;
+    case 'id-photo': return <IdPhotoPanel key={asset?.id ?? 'none'} asset={asset} onPreview={onIdPhotoPreview} onBrushApply={onIdPhotoBrush} onLoadClothing={onIdPhotoClothing} onApply={onIdPhoto} onStage={onIdPhotoStage} onStageUpdate={onIdPhotoStageUpdate} setNotice={setNotice} />;
     default: return <EmptyPanel />;
   }
 }
@@ -1132,27 +1325,25 @@ function SplitPanel({ asset, onApply }: { asset: ImageAsset; onApply: (direction
   return <DirectSplitPanel asset={asset} onApply={onApply} />;
 }
 
-function MergePanel({ assets, onApply, setNotice }: { assets: ImageAsset[]; onApply: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>; setNotice: (notice: Notice) => void }) {
-  const count = assets.length;
-  const sameSize = assets.length > 0 && assets.every((asset) => asset.width === assets[0].width && asset.height === assets[0].height);
-  const [layout, setLayout] = useState<'horizontal' | 'vertical' | 'grid'>(sameSize ? 'grid' : 'horizontal');
+function MergePanel({ count, onApply, setNotice }: { count: number; onApply: (layout: 'horizontal' | 'vertical' | 'grid', gap: number, background: string) => Promise<void>; setNotice: (notice: Notice) => void }) {
+  const [layout, setLayout] = useState<'horizontal' | 'vertical' | 'grid'>('grid');
   const [gap, setGap] = useState(16);
   const [background, setBackground] = useState('#ffffff');
   function chooseLayout(next: 'horizontal' | 'vertical' | 'grid') {
-    if (next === 'grid' && !sameSize) {
+    if (next === 'grid') {
       setNotice({ type: 'warning', text: '网格拼图要求所有图片尺寸一致，请先统一图片大小' });
       return;
     }
     setLayout(next);
   }
   function apply() {
-    if (layout === 'grid' && !sameSize) {
+    if (layout === 'grid') {
       setNotice({ type: 'warning', text: '网格拼图要求所有图片尺寸一致，请先统一图片大小' });
       return;
     }
     void onApply(layout, gap, background);
   }
-  return <><PanelIntro title="合并与拼图" description="横向和纵向按原图边缘拼接，网格要求所有图片尺寸一致。" /><div className="inline-info"><Layers3 size={16} /><span>当前工作区 <strong>{count} 张图片</strong></span></div>{!sameSize && <div className="inline-info merge-warning"><Info size={16} /><span>当前图片尺寸不同，网格按钮已置灰；横向、纵向仍可直接拼接。</span></div>}<div className="control-section"><div className="section-label">布局</div><div className="segmented-grid three"><button className={layout === 'horizontal' ? 'is-selected' : ''} onClick={() => chooseLayout('horizontal')}>横向</button><button className={layout === 'vertical' ? 'is-selected' : ''} onClick={() => chooseLayout('vertical')}>纵向</button><button className={`${layout === 'grid' ? 'is-selected' : ''} ${!sameSize ? 'is-disabled' : ''}`} aria-disabled={!sameSize} title={!sameSize ? '网格拼图要求所有图片尺寸一致' : '网格拼图'} onClick={() => chooseLayout('grid')}>网格</button></div></div><div className="control-section"><Field label="图片间距" suffix="px"><input type="number" min="0" max="200" value={gap} onChange={(event) => setGap(Number(event.target.value))} /></Field><div className="color-field"><span>背景颜色</span><label><input type="color" value={background} onChange={(event) => setBackground(event.target.value)} /><b>{background.toUpperCase()}</b></label></div></div><ApplyButton onClick={apply} label="生成拼图" /></>;
+  return <><PanelIntro title="合并与拼图" description="横向和纵向按原图边缘拼接，网格要求所有图片尺寸一致。" /><div className="inline-info"><Layers3 size={16} /><span>当前工作区 <strong>{count} 个文档</strong></span></div><div className="control-section"><div className="section-label">布局</div><div className="segmented-grid three"><button className={layout === 'horizontal' ? 'is-selected' : ''} onClick={() => chooseLayout('horizontal')}>横向</button><button className={layout === 'vertical' ? 'is-selected' : ''} onClick={() => chooseLayout('vertical')}>纵向</button><button className={`${layout === 'grid' ? 'is-selected' : ''}`}  title={'网格拼图'} onClick={() => chooseLayout('grid')}>网格</button></div></div><div className="control-section"><Field label="图片间距" suffix="px"><input type="number" min="0" max="200" value={gap} onChange={(event) => setGap(Number(event.target.value))} /></Field><div className="color-field"><span>背景颜色</span><label><input type="color" value={background} onChange={(event) => setBackground(event.target.value)} /><b>{background.toUpperCase()}</b></label></div></div><ApplyButton onClick={apply} label="生成拼图" /></>;
 }
 
 function EncodePanel({ mode, asset, onApply }: { mode: 'compress' | 'convert'; asset: ImageAsset; onApply: (format: ExportFormat, quality: number, background: string) => Promise<void> }) {
@@ -1165,7 +1356,7 @@ function EncodePanel({ mode, asset, onApply }: { mode: 'compress' | 'convert'; a
 
 function EditPanel({ onApply, onPreview }: { onApply: (values: EditValues) => Promise<void>; onPreview: (values: EditValues) => void }) {
   const [values, setValues] = useState<EditValues>(defaultEditValues);
-  const fields = [['brightness', '亮度', -100, 100], ['contrast', '对比度', -100, 100], ['saturation', '饱和度', -100, 100], ['blur', '模糊', 0, 12]] as const;
+  const fields = [['brightness', '亮度', -100, 100], ['contrast', '对比度', -100, 100], ['saturation', '饱和度', -100, 100], ['blur', '模糊', 0, 12], ['denoise', '降噪', 0, 100], ['sharpen', '锐化', 0, 100]] as const;
   function updateValue(key: keyof EditValues, value: number) {
     const next = { ...values, [key]: value };
     setValues(next);
@@ -1520,6 +1711,8 @@ function CleanupPanel({ asset, onApply }: { asset: ImageAsset; onApply: (stroke:
 
 function AiModelPanel({ task, asset, onApply, setNotice, compact = false }: { task: AiTask; asset: ImageAsset; onApply: (request: AiRequest) => Promise<void>; setNotice: (notice: Notice) => void; compact?: boolean }) {
   const [scale, setScale] = useState<2 | 4>(2);
+  const [denoise, setDenoise] = useState(0);
+  const [sharpen, setSharpen] = useState(0);
   const [capability, setCapability] = useState<AiCapability | null>(null);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -1558,7 +1751,7 @@ function AiModelPanel({ task, asset, onApply, setNotice, compact = false }: { ta
     try {
       await aiAdapter.load(modelId, (value) => setProgress(value * 0.72));
       setProgress(0.78);
-      await onApply({ mode: 'model', task, scale });
+      await onApply({ mode: 'model', task, scale, denoise, sharpen });
       setProgress(1);
     } catch (error) {
       pendingResultRef.current = false;
@@ -1579,6 +1772,7 @@ function AiModelPanel({ task, asset, onApply, setNotice, compact = false }: { ta
     <div className="ai-model-note"><ShieldCheck size={15} /><span><strong>本地推理</strong><small>WebGPU 优先 · WASM 自动降级 · 无需上传原图</small></span></div>
     <div className="control-section"><div className="ai-task-card is-selected single"><SelectedTaskIcon size={17} /><span><strong>{selectedTask.label}</strong><small>{selectedTask.description}</small><em>{selectedTask.model.toUpperCase()} · ONNX</em></span><Check size={14} /></div></div>
     {task === 'upscale' && <div className="control-section"><div className="section-label">输出倍率</div><div className="segmented-grid two"><button type="button" className={scale === 2 ? 'is-selected' : ''} onClick={() => setScale(2)}>2x 标准</button><button type="button" className={scale === 4 ? 'is-selected' : ''} onClick={() => setScale(4)}>4x 高清</button></div></div>}
+    {task === 'upscale' && <div className="control-section"><div className="section-label">细节增强</div><div className="range-heading"><span>降噪</span><strong>{denoise}%</strong></div><input className="range-input" type="range" min="0" max="100" value={denoise} onChange={(event) => setDenoise(Number(event.target.value))} /><div className="range-labels"><span>保留颗粒</span><span>平滑噪点</span></div><div className="range-heading"><span>锐化</span><strong>{sharpen}%</strong></div><input className="range-input" type="range" min="0" max="100" value={sharpen} onChange={(event) => setSharpen(Number(event.target.value))} /><div className="range-labels"><span>自然柔和</span><span>边缘锐利</span></div></div>}
     <div className="ai-status"><div className={`ai-orb ${capability?.runtime === 'unavailable' ? 'is-muted' : ''}`}><WandSparkles size={20} /></div><div><strong>{capability ? capability.runtime === 'webgpu' ? 'WebGPU 已就绪' : capability.runtime === 'wasm' ? 'WASM 兼容模式' : '当前设备不支持' : '正在检测本机能力'}</strong><small>{capability?.runtime === 'webgpu' ? '首次使用下载模型，之后复用浏览器缓存' : capability?.runtime === 'wasm' ? '首次使用下载模型和运行时，之后复用浏览器缓存' : '按需加载本地模型，不上传原图'}</small></div><span className="ai-runtime-chip">{capability?.runtime === 'webgpu' ? 'GPU' : 'LOCAL'}</span></div>
     <div className="ai-compare"><div className="ai-compare-toolbar"><div><span className="section-label">前后对比</span><small>{sourceName} → {isSameAsset ? '等待处理' : asset.name}</small></div><div className="segmented-control"><button type="button" className={compareMode === 'before' ? 'is-selected' : ''} onClick={() => setCompareMode('before')}>原图</button><button type="button" className={compareMode === 'after' ? 'is-selected' : ''} onClick={() => setCompareMode('after')}>结果</button></div></div><div className="ai-compare-stage"><img src={compareMode === 'before' ? sourceUrl : asset.url} alt={compareMode === 'before' ? 'AI 处理前原图' : 'AI 处理后结果'} />{task === 'remove-background' && compareMode === 'after' && !isSameAsset && <span className="transparency-label">透明背景</span>}</div><div className="ai-compare-meta"><span>{compareMode === 'before' ? `${asset.originalWidth} × ${asset.originalHeight}` : `${asset.width} × ${asset.height}`}</span><span>{compareMode === 'before' ? '处理前' : isSameAsset ? '尚未运行' : outputLabel}</span></div></div>
     <div className="ai-progress" aria-hidden={!loading}><div><span>{loading ? `正在准备 ${selectedTask.label}` : `按需加载 ${selectedTask.model.toUpperCase()} 模型`}</span><strong>{loading ? `${Math.round(progress * 100)}%` : '就绪'}</strong></div><div className="ai-progress-track"><span style={{ width: `${loading ? Math.round(progress * 100) : 0}%` }} /></div></div>

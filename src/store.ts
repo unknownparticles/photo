@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ImageAsset, ImageOperation, ToolId } from './types';
+import type { ImageOperation, PhotoDocument, ToolId } from './types';
 
 interface HistoryEntry {
   id: string;
@@ -10,23 +10,24 @@ interface HistoryEntry {
 }
 
 interface ImageSnapshot {
-  assets: ImageAsset[];
-  activeAssetId: string | null;
+  documents: PhotoDocument[];
+  activeDocumentId: string | null;
   activeTool: ToolId | null;
 }
 
 interface AppState {
-  assets: ImageAsset[];
-  activeAssetId: string | null;
+  documents: PhotoDocument[];
+  activeDocumentId: string | null;
   activeTool: ToolId | null;
   operations: ImageOperation[];
   undoStack: ImageSnapshot[];
   redoStack: ImageSnapshot[];
   history: HistoryEntry[];
   isDark: boolean;
-  addAssets: (assets: ImageAsset[]) => void;
-  replaceAssets: (assets: ImageAsset[]) => void;
-  setActiveAsset: (id: string | null) => void;
+  addDocuments: (documents: PhotoDocument[]) => void;
+  replaceDocuments: (documents: PhotoDocument[]) => void;
+  updateDocument: (id: string, updater: (document: PhotoDocument) => PhotoDocument) => void;
+  setActiveDocument: (id: string | null) => void;
   setActiveTool: (tool: ToolId | null) => void;
   addOperation: (operation: ImageOperation) => void;
   checkpoint: () => void;
@@ -38,40 +39,41 @@ interface AppState {
 }
 
 export const useAppStore = create<AppState>((set) => ({
-  assets: [],
-  activeAssetId: null,
+  documents: [],
+  activeDocumentId: null,
   activeTool: null,
   operations: [],
   undoStack: [],
   redoStack: [],
   history: JSON.parse(localStorage.getItem('alun-image-history') ?? '[]') as HistoryEntry[],
   isDark: false,
-  addAssets: (assets) => set((state) => ({ assets: [...state.assets, ...assets], activeAssetId: state.activeAssetId ?? assets[0]?.id ?? null })),
-  replaceAssets: (assets) => set({ assets, activeAssetId: assets[0]?.id ?? null }),
-  setActiveAsset: (activeAssetId) => set({ activeAssetId }),
+  addDocuments: (documents) => set((state) => ({ documents: [...state.documents, ...documents], activeDocumentId: state.activeDocumentId ?? documents[0]?.id ?? null })),
+  replaceDocuments: (documents) => set({ documents, activeDocumentId: documents[0]?.id ?? null }),
+  updateDocument: (id, updater) => set((state) => ({ documents: state.documents.map((document) => (document.id === id ? updater(document) : document)) })),
+  setActiveDocument: (activeDocumentId) => set({ activeDocumentId }),
   setActiveTool: (activeTool) => set({ activeTool }),
   addOperation: (operation) => set((state) => ({ operations: [...state.operations, operation] })),
-  checkpoint: () => set((state) => ({ undoStack: [...state.undoStack, { assets: state.assets, activeAssetId: state.activeAssetId, activeTool: state.activeTool }].slice(-20), redoStack: [] })),
+  checkpoint: () => set((state) => ({ undoStack: [...state.undoStack, { documents: state.documents, activeDocumentId: state.activeDocumentId, activeTool: state.activeTool }].slice(-20), redoStack: [] })),
   undo: () => set((state) => {
     const previous = state.undoStack[state.undoStack.length - 1];
     if (!previous) return state;
     return {
-      assets: previous.assets,
-      activeAssetId: previous.activeAssetId,
+      documents: previous.documents,
+      activeDocumentId: previous.activeDocumentId,
       activeTool: previous.activeTool,
       undoStack: state.undoStack.slice(0, -1),
-      redoStack: [...state.redoStack, { assets: state.assets, activeAssetId: state.activeAssetId, activeTool: state.activeTool }],
+      redoStack: [...state.redoStack, { documents: state.documents, activeDocumentId: state.activeDocumentId, activeTool: state.activeTool }],
     };
   }),
   redo: () => set((state) => {
     const next = state.redoStack[state.redoStack.length - 1];
     if (!next) return state;
     return {
-      assets: next.assets,
-      activeAssetId: next.activeAssetId,
+      documents: next.documents,
+      activeDocumentId: next.activeDocumentId,
       activeTool: next.activeTool,
-      undoStack: [...state.undoStack, { assets: state.assets, activeAssetId: state.activeAssetId, activeTool: state.activeTool }],
-      redoStack: state.redoStack.slice(0, -1),
+      undoStack: state.undoStack.slice(0, -1),
+      redoStack: [...state.redoStack, { documents: state.documents, activeDocumentId: state.activeDocumentId, activeTool: state.activeTool }],
     };
   }),
   addHistory: (entry) => set((state) => {

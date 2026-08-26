@@ -4,6 +4,19 @@ import { ArrowRightLeft, Brush, Eraser, Gauge, Hand, Info, Sparkles, WandSparkle
 import { miganAdapter, runInpaint } from '../core/inpaint';
 import type { InpaintMode, InpaintStroke } from '../core/inpaint';
 import { useAppStore } from '../store';
+import { flattenDocument } from '../core/documents';
+import type { PhotoDocument, ImageAsset } from '../types';
+
+function useViewModelAsset(doc: PhotoDocument | null): ImageAsset | null {
+  const [view, setView] = useState<ImageAsset | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!doc) { setView(null); return; }
+    void flattenDocument(doc).then((flat) => { if (!cancelled) setView(flat); }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [doc]);
+  return view;
+}
 import { getBrowserLocale, translateText } from '../i18n';
 import './LocalInpaintBridge.css';
 
@@ -333,9 +346,10 @@ export default function LocalInpaintBridge() {
   const [status, setStatus] = useState('');
   const [progress, setProgress] = useState<number | null>(null);
   const [miganStatus, setMiganStatus] = useState<MiganStatus>(emptyMiganStatus);
-  const assets = useAppStore((state) => state.assets);
-  const activeAssetId = useAppStore((state) => state.activeAssetId);
-  const asset = useMemo(() => assets.find((item) => item.id === activeAssetId) ?? null, [assets, activeAssetId]);
+  const documents = useAppStore((state) => state.documents);
+  const activeDocumentId = useAppStore((state) => state.activeDocumentId);
+  const activeDoc = useMemo(() => documents.find((item) => item.id === activeDocumentId) ?? null, [documents, activeDocumentId]);
+  const asset = useViewModelAsset(activeDoc);
 
   useEffect(() => {
     let frame = 0;
@@ -461,9 +475,17 @@ export default function LocalInpaintBridge() {
         },
       });
       const store = useAppStore.getState();
+      if (!activeDoc) return;
       store.checkpoint();
-      store.replaceAssets(store.assets.map((item) => item.id === asset.id ? next : item));
-      store.setActiveAsset(next.id);
+      const layer = { id: crypto.randomUUID(), name: '局部重绘', type: next.type, blob: next.blob, url: next.url, width: next.width, height: next.height, visible: true, offsetX: 0, offsetY: 0 };
+      store.updateDocument(activeDoc.id, (current) => ({
+        ...current,
+        edited: true,
+        canvasWidth: next.width,
+        canvasHeight: next.height,
+        layers: [...current.layers.map((item) => ({ ...item, visible: false })), layer],
+        activeLayerId: layer.id,
+      }));
       const model = engine === 'migan' ? 'MI-GAN-512' : 'Moebius-0.22B';
       store.addOperation({ id: crypto.randomUUID(), type: 'local-inpaint', params: { model, mode, repairPreference, ...(engine === 'moebius' ? { steps, guidance, seed } : {}) }, createdAt: Date.now() });
       store.addHistory({ name: next.name, label: '局部重绘', detail: engine === 'migan' ? `MI-GAN 512 · ${repair.label}` : `Moebius 0.22B · ${steps} steps · ${repair.label}` });
