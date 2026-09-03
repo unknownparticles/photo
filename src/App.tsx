@@ -1190,6 +1190,8 @@ function Workspace({
   onCleanupTemplate,
   onCleanupTemplateAll,
   onWatermark,
+  onQrGenerate,
+  onCollageExport,
   onMetadata,
   onClearMetadata,
   onExportGif,
@@ -1347,7 +1349,7 @@ function LayerPanel({ document: doc, onSelectLayer, onToggleLayer, onRenameLayer
   );
 }
 
-function ToolPanel({ tool, asset, onIdPhotoStage, onIdPhotoStageUpdate, onResize, onCrop, onIdPhotoPreview, onIdPhotoBrush, onIdPhotoClothing, onIdPhoto, onSplit, onMerge, onEncode, onEdit, onEditPreview, onMattingApply, onMattingBrushApply, onAiApply, onCleanup, onCleanupTemplate, onCleanupTemplateAll, documentCount, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, batchProgress, setNotice }: {
+function ToolPanel({ tool, asset, onIdPhotoStage, onIdPhotoStageUpdate, onResize, onCrop, onIdPhotoPreview, onIdPhotoBrush, onIdPhotoClothing, onIdPhoto, onSplit, onMerge, onEncode, onEdit, onEditPreview, onMattingApply, onMattingBrushApply, onAiApply, onCleanup, onCleanupTemplate, onCleanupTemplateAll, documentCount, onWatermark, onQrGenerate, onCollageExport, onMetadata, onClearMetadata, onExportGif, onBatch, batchProgress, setNotice }: {
   tool: ToolId;
   asset: ImageAsset | null;
   onResize: (width: number, height: number) => Promise<void>;
@@ -1381,22 +1383,23 @@ function ToolPanel({ tool, asset, onIdPhotoStage, onIdPhotoStageUpdate, onResize
   setNotice: (notice: Notice) => void;
 }) {
   if (!asset && tool !== 'qrcode' && tool !== 'collage') return <EmptyPanel />;
+  const safeAsset = asset!;
   switch (tool) {
-    case 'resize': return <ResizePanel asset={asset} onApply={onResize} />;
-    case 'crop': return <CropPanel asset={asset} onApply={onCrop} />;
-    case 'split': return <SplitPanel asset={asset} onApply={onSplit} />;
+    case 'resize': return <ResizePanel asset={safeAsset} onApply={onResize} />;
+    case 'crop': return <CropPanel asset={safeAsset} onApply={onCrop} />;
+    case 'split': return <SplitPanel asset={safeAsset} onApply={onSplit} />;
     case 'merge': return <MergePanel count={0} onApply={onMerge} setNotice={setNotice} />;
-    case 'compress': return <EncodePanel mode="compress" asset={asset} onApply={onEncode} />;
-    case 'convert': return <EncodePanel mode="convert" asset={asset} onApply={onEncode} />;
-    case 'matting': return <MattingPanel asset={asset} onApply={onMattingApply} onBrushApply={onMattingBrushApply} onAiApply={onAiApply} setNotice={setNotice} />;
-    case 'cleanup': return <CleanupPanel asset={asset} documentCount={documentCount} onApply={onCleanup} onApplyTemplate={onCleanupTemplate} onApplyTemplateBatch={onCleanupTemplateAll} setNotice={setNotice} />;
-    case 'ai-upscale': return <AiModelPanel task="upscale" asset={asset} onApply={onAiApply} setNotice={setNotice} />;
+    case 'compress': return <EncodePanel mode="compress" asset={safeAsset} onApply={onEncode} />;
+    case 'convert': return <EncodePanel mode="convert" asset={safeAsset} onApply={onEncode} />;
+    case 'matting': return <MattingPanel asset={safeAsset} onApply={onMattingApply} onBrushApply={onMattingBrushApply} onAiApply={onAiApply} setNotice={setNotice} />;
+    case 'cleanup': return <CleanupPanel asset={safeAsset} documentCount={documentCount} onApply={onCleanup} onApplyTemplate={onCleanupTemplate} onApplyTemplateBatch={onCleanupTemplateAll} setNotice={setNotice} />;
+    case 'ai-upscale': return <AiModelPanel task="upscale" asset={safeAsset} onApply={onAiApply} setNotice={setNotice} />;
     case 'edit': return <EditPanel onApply={onEdit} onPreview={onEditPreview} />;
-    case 'watermark': return <WatermarkPanel asset={asset} onApply={onWatermark} />;
-    case 'metadata': return <MetadataPanel asset={asset} onApply={onMetadata} onClear={onClearMetadata} setNotice={setNotice} />;
+    case 'watermark': return <WatermarkPanel asset={safeAsset} onApply={onWatermark} />;
+    case 'metadata': return <MetadataPanel asset={safeAsset} onApply={onMetadata} onClear={onClearMetadata} setNotice={setNotice} />;
     case 'batch': return <BatchPanel count={1} progress={batchProgress} onApply={onBatch} />;
     case 'gif': return <GifPanel count={0} onApply={onExportGif} />;
-    case 'id-photo': return <IdPhotoPanel key={asset?.id ?? 'none'} asset={asset} onPreview={onIdPhotoPreview} onBrushApply={onIdPhotoBrush} onLoadClothing={onIdPhotoClothing} onApply={onIdPhoto} onStage={onIdPhotoStage} onStageUpdate={onIdPhotoStageUpdate} setNotice={setNotice} />;
+    case 'id-photo': return <IdPhotoPanel key={asset?.id ?? 'none'} asset={safeAsset} onPreview={onIdPhotoPreview} onBrushApply={onIdPhotoBrush} onLoadClothing={onIdPhotoClothing} onApply={onIdPhoto} onStage={onIdPhotoStage} onStageUpdate={onIdPhotoStageUpdate} setNotice={setNotice} />;
     case 'qrcode': return <QrCodePanel onGenerate={onQrGenerate} />;
     case 'collage': return <CollagePanel asset={asset} onExport={onCollageExport} setNotice={setNotice} />;
     default: return <EmptyPanel />;

@@ -5,7 +5,7 @@ import { composeCollage } from '../core/collage';
 import type { CollageLayer } from '../core/collage';
 import { Combine, Download, Eye, EyeOff, ImagePlus, Layers3, Trash2 } from 'lucide-react';
 
-type Sticker = CollageLayer & { id: string };
+type Sticker = CollageLayer & { id: string; visible?: boolean };
 
 export function CollagePanel({ asset, onExport, setNotice }: { asset: ImageAsset | null; onExport: (asset: ImageAsset) => Promise<void>; setNotice: (notice: { type: 'success' | 'warning' | 'error'; text: string } | null) => void }) {
   const baseAsset = asset;
@@ -97,12 +97,15 @@ export function CollagePanel({ asset, onExport, setNotice }: { asset: ImageAsset
     const sticker: Sticker = {
       id,
       asset,
+      width: asset.width,
+      height: asset.height,
       offsetX: canvasWidth / 2 - asset.width / 2,
       offsetY: canvasHeight / 2 - asset.height / 2,
       rotation: 0,
       scaleX: 1,
       scaleY: 1,
       opacity: 1,
+      visible: true,
     };
     setStickers((current) => [...current, sticker]);
     setSelectedId(id);
@@ -117,8 +120,8 @@ export function CollagePanel({ asset, onExport, setNotice }: { asset: ImageAsset
     setExporting(true);
     try {
       const layers: CollageLayer[] = [
-        { asset: baseAsset, offsetX: 0, offsetY: 0, rotation: 0, scaleX: 1, scaleY: 1, opacity: 1 },
-        ...stickers.map(({ asset, offsetX, offsetY, rotation, scaleX, scaleY, opacity }) => ({ asset, offsetX, offsetY, rotation, scaleX, scaleY, opacity })),
+        { asset: baseAsset, width: baseAsset.width, height: baseAsset.height, offsetX: 0, offsetY: 0, rotation: 0, scaleX: 1, scaleY: 1, opacity: 1 },
+        ...stickers.map(({ asset, offsetX, offsetY, rotation, scaleX, scaleY, opacity }) => ({ asset, width: asset.width, height: asset.height, offsetX, offsetY, rotation, scaleX, scaleY, opacity })),
       ];
       const blob = await composeCollage({ canvasWidth, canvasHeight, background, layers });
       const exported = await createAssetFromBlob(blob, `拼贴-${Date.now()}.png`);
@@ -133,8 +136,8 @@ export function CollagePanel({ asset, onExport, setNotice }: { asset: ImageAsset
     setExporting(true);
     try {
       const layers: CollageLayer[] = [
-        { asset: baseAsset, offsetX: 0, offsetY: 0, rotation: 0, scaleX: 1, scaleY: 1, opacity: 1 },
-        ...stickers.map(({ asset, offsetX, offsetY, rotation, scaleX, scaleY, opacity }) => ({ asset, offsetX, offsetY, rotation, scaleX, scaleY, opacity })),
+        { asset: baseAsset, width: baseAsset.width, height: baseAsset.height, offsetX: 0, offsetY: 0, rotation: 0, scaleX: 1, scaleY: 1, opacity: 1 },
+        ...stickers.map(({ asset, offsetX, offsetY, rotation, scaleX, scaleY, opacity }) => ({ asset, width: asset.width, height: asset.height, offsetX, offsetY, rotation, scaleX, scaleY, opacity })),
       ];
       const blob = await composeCollage({ canvasWidth, canvasHeight, background, layers });
       downloadBlob(blob, `拼贴-${Date.now()}.png`);

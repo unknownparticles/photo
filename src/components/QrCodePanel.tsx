@@ -3,14 +3,14 @@ import type { ImageAsset } from '../types';
 import { generateQrCodeAsset, generateQrCodeDataURL } from '../core/qrcode';
 import { Download, ImagePlus, QrCode } from 'lucide-react';
 
-type QrLogo = { dataUrl: string; size: number };
+  type QrLogo = { dataUrl: string; size: number } | undefined;
 
 export function QrCodePanel({ onGenerate }: { onGenerate: (asset: ImageAsset) => Promise<void> }) {
   const [text, setText] = useState('https://example.com');
   const [width, setWidth] = useState(512);
   const [fgColor, setFgColor] = useState('#000000');
   const [bgColor, setBgColor] = useState('#ffffff');
-  const [logo, setLogo] = useState<QrLogo | null>(null);
+  const [logo, setLogo] = useState<QrLogo>(undefined);
   const [preview, setPreview] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -80,7 +80,7 @@ export function QrCodePanel({ onGenerate }: { onGenerate: (asset: ImageAsset) =>
             <div className="range-heading"><span>Logo 大小</span><strong>{Math.round(logo.size * 100)}%</strong></div>
             <input className="range-input" type="range" min="5" max="30" value={Math.round(logo.size * 100)} onChange={(event) => setLogo((current) => current ? { ...current, size: Number(event.target.value) / 100 } : current)} />
             <div className="range-labels"><span>较小</span><span>较大</span></div>
-            <button type="button" className="text-button" onClick={() => setLogo(null)}>移除 Logo</button>
+            <button type="button" className="text-button" onClick={() => setLogo(undefined)}>移除 Logo</button>
           </div>
         )}
       </div>

@@ -1,4 +1,4 @@
-import { QRCode } from 'qrcode';
+import { toDataURL } from 'qrcode';
 import { createAssetFromBlob, loadImage } from './image';
 import type { ImageAsset } from '../types';
 
@@ -13,7 +13,7 @@ export interface QrCodeOptions {
 export async function generateQrCodeDataURL(options: QrCodeOptions): Promise<string> {
   const { text, width, fgColor, bgColor } = options;
   if (!text.trim()) throw new Error('二维码内容不能为空');
-  const qrDataUrl = await QRCode.toDataURL(text, {
+  const qrDataUrl = await toDataURL(text, {
     width,
     margin: 2,
     color: { dark: fgColor, light: bgColor },

@@ -3,6 +3,8 @@ import { canvasToBlob, loadImage } from './image';
 
 export interface CollageLayer {
   asset: ImageAsset;
+  width: number;
+  height: number;
   offsetX: number;
   offsetY: number;
   rotation?: number;
