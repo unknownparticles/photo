@@ -13,7 +13,8 @@ export type ToolId =
   | 'metadata'
   | 'batch'
   | 'gif'
-  | 'id-photo';
+  | 'id-photo'
+  | 'qrcode';
 
 export type ExportFormat = 'image/jpeg' | 'image/png' | 'image/webp' | 'image/avif' | 'image/gif';
 

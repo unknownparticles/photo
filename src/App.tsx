@@ -36,7 +36,9 @@ import {
   Paintbrush,
   Pipette,
   Plus,
+  QrCode,
   RotateCcw,
+  ScanSearch,
   Settings2,
   ShieldCheck,
   SlidersHorizontal,
@@ -48,6 +50,7 @@ import {
   UploadCloud,
   WandSparkles,
   X,
+  Zap,
   Redo2,
 } from 'lucide-react';
 import { aiAdapter } from './core/ai';
@@ -81,8 +84,10 @@ import {
   canvasToBlob,
 } from './core/image';
 import { useAppStore } from './store';
+import { extractWatermarkFromSelections, removeWatermarkByTemplate, removeWatermarkByTemplates, enhanceWatermark } from './core/watermark';
 import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, BackgroundColorSample, BatchCropAlignment, BatchOptions, BatchProgress, CleanupBrushStroke, ExportFormat, IdPhotoClothingLayer, IdPhotoMattingPreview, ImageAsset, ImageOperation, Layer, LocalBackgroundRemovalOptions, PhotoDocument, SplitLine, ToolId, WatermarkOptions } from './types';
 import { DirectCropPanel, DirectSplitPanel, IdPhotoPanel } from './components/DirectImageControls';
+import { QrCodePanel } from './components/QrCodePanel';
 import { EditorOverlayContext, useEditorOverlay } from './components/EditorOverlay';
 import { getStoredLanguagePreference, observeDocumentLocale, resolveLocale, setStoredLanguagePreference } from './i18n';
 import type { LanguagePreference } from './i18n';
@@ -122,6 +127,7 @@ const tools: ToolDefinition[] = [
   { id: 'batch', label: '批处理', description: '一套规则多张图', icon: Layers3, category: '工作流', accent: 'orange' },
   { id: 'gif', label: 'GIF', description: '动图帧与导出', icon: Film, category: '工作流', accent: 'purple' },
   { id: 'id-photo', label: '证件照', description: '规格快速出片', icon: BadgeCheck, category: '工作流', accent: 'red' },
+  { id: 'qrcode', label: '二维码', description: '生成自定义二维码', icon: QrCode, category: '工作流', accent: 'emerald' },
 ];
 
 const presets = [
@@ -730,9 +736,71 @@ async function previewIdPhoto(values: { x: number; y: number; width: number; hei
     }
   }
 
+  async function applyCleanupTemplateValue(templates: ImageAsset[], threshold: number, edgePadding: number, fillMode: 'fast' | 'quality') {
+    if (!activeDocument || templates.length === 0) return;
+    try {
+      const options = { threshold, edgePadding, fillMode };
+      const label = `自动识别 · 匹配度 ${Math.round(threshold * 100)}% · 扩展 ${edgePadding}px · ${fillMode === 'fast' ? '普通填充' : 'AI 填充'}`;
+      if (templates.length > 1) {
+        await bakeTopLayer('模板去水印', label, (flat) => removeWatermarkByTemplates(flat, templates, options));
+      } else {
+        await bakeTopLayer('模板去水印', label, (flat) => removeWatermarkByTemplate(flat, templates[0], options));
+      }
+      setNotice({ type: 'success', text: '模板去水印完成' });
+    } catch (error) {
+      setNotice({ type: 'warning', text: error instanceof Error ? error.message : '模板去水印失败' });
+    }
+  }
+
+  async function applyCleanupTemplateAll(templates: ImageAsset[], threshold: number, edgePadding: number, fillMode: 'fast' | 'quality') {
+    if (!documents.length || templates.length === 0) return;
+    checkpoint();
+    const nextDocuments: PhotoDocument[] = [];
+    let failed = 0;
+    const options = { threshold, edgePadding, fillMode };
+    for (let index = 0; index < documents.length; index += 1) {
+      const target = documents[index];
+      setNotice({ type: 'success', text: `模板去水印进度 ${index + 1}/${documents.length}` });
+      try {
+        const flat = await flattenDocument(target);
+        const cleaned = templates.length > 1 ? await removeWatermarkByTemplates(flat, templates, options) : await removeWatermarkByTemplate(flat, templates[0], options);
+        const layer = layerFromAsset(cleaned, `${target.name} · 去水印`);
+        nextDocuments.push({
+          ...target,
+          edited: true,
+          type: cleaned.type,
+          canvasWidth: cleaned.width,
+          canvasHeight: cleaned.height,
+          layers: [...target.layers.map((item) => ({ ...item, visible: false })), layer],
+          activeLayerId: layer.id,
+        });
+      } catch {
+        failed += 1;
+        nextDocuments.push(target);
+      }
+    }
+    replaceDocuments(nextDocuments);
+    addHistory({ name: `${documents.length} 张图片`, label: '模板批量去水印', detail: failed ? `${documents.length - failed} 成功 · ${failed} 失败` : '全部成功' });
+    setNotice({ type: failed ? 'warning' : 'success', text: failed ? `批量去水印完成：${documents.length - failed} 张成功，${failed} 张未识别到水印` : `批量去水印完成，已处理 ${nextDocuments.length} 张图片` });
+  }
+
   async function applyWatermarkValue(options: WatermarkOptions) {
     if ((options.kind === 'text' && !options.text.trim()) || (options.kind === 'image' && !options.image)) return;
     await applyEffectLayer('添加水印', options.kind === 'text' ? options.text : '图片水印', (flat) => applyWatermark(flat, options));
+  }
+
+  async function applyQrGenerate(asset: ImageAsset) {
+    if (!activeDocument) return;
+    const layer = layerFromAsset(asset, `二维码 · ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`);
+    commitDocument({
+      ...activeDocument,
+      edited: true,
+      type: asset.type,
+      canvasWidth: asset.width,
+      canvasHeight: asset.height,
+      layers: [...activeDocument.layers.map((item) => ({ ...item, visible: false })), layer],
+      activeLayerId: layer.id,
+    }, '生成二维码', asset.name);
   }
 
   async function applyMetadataValue(values: Record<string, string>) {
@@ -983,7 +1051,10 @@ async function previewIdPhoto(values: { x: number; y: number; width: number; hei
           onMattingBrushApply={applyAiBrush}
           onAiApply={applyAi}
           onCleanup={applyCleanup}
+          onCleanupTemplate={applyCleanupTemplateValue}
+          onCleanupTemplateAll={applyCleanupTemplateAll}
           onWatermark={applyWatermarkValue}
+          onQrGenerate={applyQrGenerate}
           onMetadata={applyMetadataValue}
           onClearMetadata={clearMetadataValue}
           onExportGif={exportGif}
@@ -1102,6 +1173,8 @@ function Workspace({
   onMattingBrushApply,
   onAiApply,
   onCleanup,
+  onCleanupTemplate,
+  onCleanupTemplateAll,
   onWatermark,
   onMetadata,
   onClearMetadata,
@@ -1140,7 +1213,10 @@ function Workspace({
   onMattingBrushApply: (sourceAsset: ImageAsset, stroke: BackgroundBrushStroke) => Promise<void>;
   onAiApply: (request: AiRequest) => Promise<void>;
   onCleanup: (stroke: CleanupBrushStroke) => Promise<void>;
+  onCleanupTemplate: (templates: ImageAsset[], threshold: number, edgePadding: number, fillMode: 'fast' | 'quality') => Promise<void>;
+  onCleanupTemplateAll: (templates: ImageAsset[], threshold: number, edgePadding: number, fillMode: 'fast' | 'quality') => Promise<void>;
   onWatermark: (options: WatermarkOptions) => Promise<void>;
+  onQrGenerate: (asset: ImageAsset) => Promise<void>;
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
   onExportGif: () => Promise<void>;
@@ -1203,7 +1279,7 @@ function Workspace({
       <div className="workspace-layout">
         <aside className="tool-sidebar"><div className="sidebar-title"><PanelLeft size={15} /><span>工具</span></div><div className="sidebar-list">{tools.map((tool) => { const ToolIcon = tool.icon; return <button className={`sidebar-tool ${activeTool === tool.id ? 'is-active' : ''}`} data-tool-id={tool.id} key={tool.id} onClick={() => onSelectTool(tool.id)} title={tool.description}><ToolIcon size={17} /><span>{tool.label}</span>{activeTool === tool.id && <span className="active-bar" />}</button>; })}</div><div className="sidebar-bottom"><ShieldCheck size={16} /><small>本地模式<br />Local only</small></div></aside>
         <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 直接编辑</span>{renamingDocument && activeDocument ? <span className="doc-rename"><input autoFocus value={documentNameDraft} onChange={(event) => setDocumentNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') commitDocumentRename(); if (event.key === 'Escape') setRenamingDocument(false); }} /><button type="button" className="text-button" onClick={commitDocumentRename}>确定</button><button type="button" className="text-button" onClick={() => setRenamingDocument(false)}>取消</button></span> : <button type="button" className="doc-name-button" title="点击重命名文档（同时是导出文件名）" onClick={startDocumentRename}>{activeDocument?.name ?? '未选择文档'}<Pencil size={12} /></button>}<span>{activeDocument ? `${activeDocument.canvasWidth} × ${activeDocument.canvasHeight}` : ''}</span></div><div className={`preview-stage ${canvasAspectPortrait ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeDocument ? <PreviewImage document={activeDocument} editValues={activeTool === 'edit' ? editPreview : undefined} compare={compare} onOverlayHost={setOverlayHost} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}{originReady && <button type="button" className={`preview-compare-pill ${compareActive ? 'is-engaged' : ''}`} aria-pressed={compareLocked} onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); comparePressStartRef.current = performance.now(); setComparePeeking(true); }} onPointerUp={() => endComparePress(true)} onPointerCancel={() => endComparePress(false)}><ArrowRightLeft size={13} /><span>{compareActive ? '原图对比中 · 点按退出' : '按住看原图'}</span></button>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeDocument?.name ?? '未选择文件'}</strong><small>{activeDocument ? `${activeDocument.layers.filter((layer) => layer.visible).length}/${activeDocument.layers.length} 图层可见` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeDocument && <button className="icon-button" title="删除当前文档" aria-label="删除当前文档" onClick={() => onDeleteAsset(activeDocument.id)}><Trash2 size={16} /></button>}</div></div></section>
-        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div>{activeDocument && <LayerPanel document={activeDocument} onSelectLayer={(layerId) => onUpdateDocument((current) => ({ ...current, activeLayerId: layerId }))} onToggleLayer={(layerId) => onUpdateDocument((current) => ({ ...current, edited: true, layers: current.layers.map((layer) => (layer.id === layerId ? { ...layer, visible: !layer.visible } : layer)) }))} onRenameLayer={(layerId, name) => onUpdateDocument((current) => ({ ...current, layers: current.layers.map((layer) => (layer.id === layerId ? { ...layer, name } : layer)) }))} onDeleteLayer={(layerId) => onUpdateDocument((current) => { const layers = current.layers.filter((layer) => layer.id !== layerId); return { ...current, layers, activeLayerId: current.activeLayerId === layerId ? layers[0]?.id ?? null : current.activeLayerId }; })} onExportLayer={async (layerId) => { const layer = activeDocument.layers.find((item) => item.id === layerId); if (!layer) return; await exportImage(asProcessedAsset({ id: layer.id, name: layer.name, type: layer.type, size: layer.blob.size, width: layer.width, height: layer.height, originalWidth: layer.width, originalHeight: layer.height, blob: layer.blob, url: layer.url }), { format: 'image/png', quality: 0.92, background: '#ffffff', preserveTransparency: true, preserveMetadata: false }); setNotice({ type: 'success', text: `已下载图层 ${layer.name}` }); }} />}<div className="control-scroll"><ToolPanel tool={activeTool} asset={viewAsset} onIdPhotoStage={onIdPhotoStage} onIdPhotoStageUpdate={onIdPhotoStageUpdate} onResize={onResize} onCrop={onCrop} onIdPhotoPreview={onIdPhotoPreview} onIdPhotoBrush={onIdPhotoBrush} onIdPhotoClothing={onIdPhotoClothing} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onEditPreview={setEditPreview} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onCleanup={onCleanup} onWatermark={onWatermark} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} batchProgress={batchProgress} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
+        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div>{activeDocument && <LayerPanel document={activeDocument} onSelectLayer={(layerId) => onUpdateDocument((current) => ({ ...current, activeLayerId: layerId }))} onToggleLayer={(layerId) => onUpdateDocument((current) => ({ ...current, edited: true, layers: current.layers.map((layer) => (layer.id === layerId ? { ...layer, visible: !layer.visible } : layer)) }))} onRenameLayer={(layerId, name) => onUpdateDocument((current) => ({ ...current, layers: current.layers.map((layer) => (layer.id === layerId ? { ...layer, name } : layer)) }))} onDeleteLayer={(layerId) => onUpdateDocument((current) => { const layers = current.layers.filter((layer) => layer.id !== layerId); return { ...current, layers, activeLayerId: current.activeLayerId === layerId ? layers[0]?.id ?? null : current.activeLayerId }; })} onExportLayer={async (layerId) => { const layer = activeDocument.layers.find((item) => item.id === layerId); if (!layer) return; await exportImage(asProcessedAsset({ id: layer.id, name: layer.name, type: layer.type, size: layer.blob.size, width: layer.width, height: layer.height, originalWidth: layer.width, originalHeight: layer.height, blob: layer.blob, url: layer.url }), { format: 'image/png', quality: 0.92, background: '#ffffff', preserveTransparency: true, preserveMetadata: false }); setNotice({ type: 'success', text: `已下载图层 ${layer.name}` }); }} />}<div className="control-scroll"><ToolPanel tool={activeTool} asset={viewAsset} onIdPhotoStage={onIdPhotoStage} onIdPhotoStageUpdate={onIdPhotoStageUpdate} onResize={onResize} onCrop={onCrop} onIdPhotoPreview={onIdPhotoPreview} onIdPhotoBrush={onIdPhotoBrush} onIdPhotoClothing={onIdPhotoClothing} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onEditPreview={setEditPreview} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onCleanup={onCleanup} onCleanupTemplate={onCleanupTemplate} onCleanupTemplateAll={onCleanupTemplateAll} documentCount={documents.length} onWatermark={onWatermark} onQrGenerate={onQrGenerate} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} batchProgress={batchProgress} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
       </div>
     </main>
     </EditorOverlayContext.Provider>
@@ -1256,7 +1332,7 @@ function LayerPanel({ document: doc, onSelectLayer, onToggleLayer, onRenameLayer
   );
 }
 
-function ToolPanel({ tool, asset, onIdPhotoStage, onIdPhotoStageUpdate, onResize, onCrop, onIdPhotoPreview, onIdPhotoBrush, onIdPhotoClothing, onIdPhoto, onSplit, onMerge, onEncode, onEdit, onEditPreview, onMattingApply, onMattingBrushApply, onAiApply, onCleanup, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, batchProgress, setNotice }: {
+function ToolPanel({ tool, asset, onIdPhotoStage, onIdPhotoStageUpdate, onResize, onCrop, onIdPhotoPreview, onIdPhotoBrush, onIdPhotoClothing, onIdPhoto, onSplit, onMerge, onEncode, onEdit, onEditPreview, onMattingApply, onMattingBrushApply, onAiApply, onCleanup, onCleanupTemplate, onCleanupTemplateAll, documentCount, onWatermark, onMetadata, onClearMetadata, onExportGif, onBatch, batchProgress, setNotice }: {
   tool: ToolId;
   asset: ImageAsset | null;
   onResize: (width: number, height: number) => Promise<void>;
@@ -1274,7 +1350,11 @@ function ToolPanel({ tool, asset, onIdPhotoStage, onIdPhotoStageUpdate, onResize
   onMattingBrushApply: (sourceAsset: ImageAsset, stroke: BackgroundBrushStroke) => Promise<void>;
   onAiApply: (request: AiRequest) => Promise<void>;
   onCleanup: (stroke: CleanupBrushStroke) => Promise<void>;
+  onCleanupTemplate: (templates: ImageAsset[], threshold: number, edgePadding: number, fillMode: 'fast' | 'quality') => Promise<void>;
+  onCleanupTemplateAll: (templates: ImageAsset[], threshold: number, edgePadding: number, fillMode: 'fast' | 'quality') => Promise<void>;
+  documentCount: number;
   onWatermark: (options: WatermarkOptions) => Promise<void>;
+  onQrGenerate: (asset: ImageAsset) => Promise<void>;
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
   onExportGif: () => Promise<void>;
@@ -1284,7 +1364,7 @@ function ToolPanel({ tool, asset, onIdPhotoStage, onIdPhotoStageUpdate, onResize
   batchProgress: BatchProgress;
   setNotice: (notice: Notice) => void;
 }) {
-  if (!asset) return <EmptyPanel />;
+  if (!asset && tool !== 'qrcode') return <EmptyPanel />;
   switch (tool) {
     case 'resize': return <ResizePanel asset={asset} onApply={onResize} />;
     case 'crop': return <CropPanel asset={asset} onApply={onCrop} />;
@@ -1293,7 +1373,7 @@ function ToolPanel({ tool, asset, onIdPhotoStage, onIdPhotoStageUpdate, onResize
     case 'compress': return <EncodePanel mode="compress" asset={asset} onApply={onEncode} />;
     case 'convert': return <EncodePanel mode="convert" asset={asset} onApply={onEncode} />;
     case 'matting': return <MattingPanel asset={asset} onApply={onMattingApply} onBrushApply={onMattingBrushApply} onAiApply={onAiApply} setNotice={setNotice} />;
-    case 'cleanup': return <CleanupPanel asset={asset} onApply={onCleanup} />;
+    case 'cleanup': return <CleanupPanel asset={asset} documentCount={documentCount} onApply={onCleanup} onApplyTemplate={onCleanupTemplate} onApplyTemplateBatch={onCleanupTemplateAll} setNotice={setNotice} />;
     case 'ai-upscale': return <AiModelPanel task="upscale" asset={asset} onApply={onAiApply} setNotice={setNotice} />;
     case 'edit': return <EditPanel onApply={onEdit} onPreview={onEditPreview} />;
     case 'watermark': return <WatermarkPanel asset={asset} onApply={onWatermark} />;
@@ -1301,6 +1381,7 @@ function ToolPanel({ tool, asset, onIdPhotoStage, onIdPhotoStageUpdate, onResize
     case 'batch': return <BatchPanel count={1} progress={batchProgress} onApply={onBatch} />;
     case 'gif': return <GifPanel count={0} onApply={onExportGif} />;
     case 'id-photo': return <IdPhotoPanel key={asset?.id ?? 'none'} asset={asset} onPreview={onIdPhotoPreview} onBrushApply={onIdPhotoBrush} onLoadClothing={onIdPhotoClothing} onApply={onIdPhoto} onStage={onIdPhotoStage} onStageUpdate={onIdPhotoStageUpdate} setNotice={setNotice} />;
+    case 'qrcode': return <QrCodePanel onGenerate={onQrGenerate} />;
     default: return <EmptyPanel />;
   }
 }
@@ -1379,17 +1460,29 @@ function WatermarkPanel({ asset, onApply }: { asset: ImageAsset; onApply: (optio
   const [x, setX] = useState(65);
   const [y, setY] = useState(80);
   const [width, setWidth] = useState(28);
+  const [fontSize, setFontSize] = useState(6);
+  const [frameWidth, setFrameWidth] = useState(0);
   const [watermarkImage, setWatermarkImage] = useState<ImageAsset | undefined>();
   const frameRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ mode: 'move' | 'resize'; startX: number; startY: number; x: number; y: number; width: number } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
-  const watermarkHeight = watermarkImage ? width * (watermarkImage.height / watermarkImage.width) * (asset.width / asset.height) : width * 0.18;
+  const textHeightPct = (fontSize / 100) * (asset.width / asset.height) * 100;
+  const watermarkHeight = kind === 'text' ? textHeightPct : watermarkImage ? width * (watermarkImage.height / watermarkImage.width) * (asset.width / asset.height) : width * 0.18;
 
   useEffect(() => {
     return () => {
       if (watermarkImage) URL.revokeObjectURL(watermarkImage.url);
     };
   }, [watermarkImage]);
+
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => setFrameWidth(frame.clientWidth));
+    observer.observe(frame);
+    setFrameWidth(frame.clientWidth);
+    return () => observer.disconnect();
+  }, [overlayHost]);
 
   function setPreset(nextPosition: string) {
     const nextX = nextPosition.includes('left') ? 5 : nextPosition.includes('right') ? 95 - width : (100 - width) / 2;
@@ -1438,13 +1531,14 @@ function WatermarkPanel({ asset, onApply }: { asset: ImageAsset; onApply: (optio
     setKind('image');
   }
 
-  const options: WatermarkOptions = { kind, text, opacity, position, x, y, width, fontSize: Math.max(2, Math.min(12, width / 5.6)), image: watermarkImage };
-  const overlay = <div className="editor-tool-overlay watermark-interaction" ref={frameRef} onPointerDown={(event) => event.stopPropagation()} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>{(kind === 'text' || watermarkImage) && <div className={`watermark-overlay ${kind}`} style={{ left: `${x}%`, top: `${y}%`, width: `${width}%`, opacity }} onPointerDown={(event) => startDrag(event, event.target instanceof Element && event.target.closest('.watermark-resize-handle') ? 'resize' : 'move')}>{kind === 'text' ? text : <img src={watermarkImage?.url} alt="图片水印" />}<button type="button" className="watermark-resize-handle" aria-label="调整水印大小" /></div>}</div>;
+  const options: WatermarkOptions = { kind, text, opacity, position, x, y, width, fontSize, image: watermarkImage };
+  const textPixelSize = frameWidth > 0 ? Math.round((frameWidth * fontSize) / 100) : null;
+  const overlay = <div className="editor-tool-overlay watermark-interaction" ref={frameRef} onPointerDown={(event) => event.stopPropagation()} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>{(kind === 'text' || watermarkImage) && <div className={`watermark-overlay ${kind}`} style={{ left: `${x}%`, top: `${y}%`, width: `${width}%`, opacity }} onPointerDown={(event) => startDrag(event, event.target instanceof Element && event.target.closest('.watermark-resize-handle') ? 'resize' : 'move')}>{kind === 'text' ? <span style={textPixelSize ? { fontSize: `${textPixelSize}px` } : undefined}>{text}</span> : <img src={watermarkImage?.url} alt="图片水印" />}<button type="button" className="watermark-resize-handle" aria-label="调整水印大小" /></div>}</div>;
   return <>
     {overlayHost && createPortal(overlay, overlayHost)}
     <PanelIntro title="添加水印" description="文字或图片水印都可直接在原图比例画布上拖动和缩放。" />
     <input ref={fileInput} className="visually-hidden" type="file" accept="image/*" onChange={(event) => void chooseWatermark(event.target.files?.[0])} />
-    <div className="control-section"><div className="segmented-grid two"><button className={kind === 'text' ? 'is-selected' : ''} onClick={() => setKind('text')}>文字水印</button><button className={kind === 'image' ? 'is-selected' : ''} onClick={() => { setKind('image'); fileInput.current?.click(); }}>图片水印</button></div>{kind === 'text' ? <Field label="水印文字"><input value={text} maxLength={40} onChange={(event) => setText(event.target.value)} /></Field> : <button className="watermark-file-button" onClick={() => fileInput.current?.click()}><ImagePlus size={16} /><span>{watermarkImage?.name ?? '选择一张水印图片'}</span></button>}<div className="range-heading"><span>透明度</span><strong>{Math.round(opacity * 100)}%</strong></div><input className="range-input" type="range" min="0.1" max="1" step="0.01" value={opacity} onChange={(event) => setOpacity(Number(event.target.value))} /></div>
+    <div className="control-section"><div className="segmented-grid two"><button className={kind === 'text' ? 'is-selected' : ''} onClick={() => setKind('text')}>文字水印</button><button className={kind === 'image' ? 'is-selected' : ''} onClick={() => { setKind('image'); fileInput.current?.click(); }}>图片水印</button></div>{kind === 'text' ? <Field label="水印文字"><input value={text} maxLength={40} onChange={(event) => setText(event.target.value)} /></Field> : <button className="watermark-file-button" onClick={() => fileInput.current?.click()}><ImagePlus size={16} /><span>{watermarkImage?.name ?? '选择一张水印图片'}</span></button>}{kind === 'text' && <><div className="range-heading"><span>字体大小</span><strong>{fontSize}%{textPixelSize ? ` · 约 ${textPixelSize}px` : ''}</strong></div><input className="range-input" type="range" min="2" max="24" step="0.5" value={fontSize} onChange={(event) => setFontSize(Number(event.target.value))} /><div className="range-labels"><span>更小</span><span>更大</span></div></>}<div className="range-heading"><span>透明度</span><strong>{Math.round(opacity * 100)}%</strong></div><input className="range-input" type="range" min="0.1" max="1" step="0.01" value={opacity} onChange={(event) => setOpacity(Number(event.target.value))} /></div>
     <div className="inline-info"><Droplets size={16} /><span>在中央图片上拖动水印，拖动右下角控制点调整大小。</span></div>
     <div className="control-section"><div className="section-label">快速定位</div><div className="position-grid">{['left-top', 'center-top', 'right-top', 'left-bottom', 'center', 'right-bottom'].map((value) => <button key={value} className={position === value ? 'is-selected' : ''} onClick={() => setPreset(value)}><span /></button>)}</div></div>
     <ApplyButton onClick={() => void onApply(options)} label="应用水印" />
@@ -1631,20 +1725,38 @@ function LocalMattingPanel({ asset, onApply, onBrushApply, setNotice }: { asset:
   </>;
 }
 
-function CleanupPanel({ asset, onApply }: { asset: ImageAsset; onApply: (stroke: CleanupBrushStroke) => Promise<void> }) {
+function CleanupPanel({ asset, documentCount, onApply, onApplyTemplate, onApplyTemplateBatch, setNotice }: { asset: ImageAsset; documentCount: number; onApply: (stroke: CleanupBrushStroke) => Promise<void>; onApplyTemplate: (templates: ImageAsset[], threshold: number, edgePadding: number, fillMode: 'fast' | 'quality') => Promise<void>; onApplyTemplateBatch: (templates: ImageAsset[], threshold: number, edgePadding: number, fillMode: 'fast' | 'quality') => Promise<void>; setNotice: (notice: Notice) => void }) {
   const overlayHost = useEditorOverlay();
+  const [tool, setTool] = useState<'brush' | 'template' | 'extract'>('brush');
   const [mode, setMode] = useState<CleanupBrushStroke['mode']>('ai');
   const [brushSize, setBrushSize] = useState(48);
   const [strokePoints, setStrokePoints] = useState<Array<{ x: number; y: number }>>([]);
   const [busy, setBusy] = useState(false);
+  const [templates, setTemplates] = useState<ImageAsset[]>([]);
+  const [threshold, setThreshold] = useState(86);
+  const [edgePadding, setEdgePadding] = useState(6);
+  const [fillMode, setFillMode] = useState<'fast' | 'quality'>('quality');
+  const [selection, setSelection] = useState<{ ax: number; ay: number; bx: number; by: number } | null>(null);
+  const [selecting, setSelecting] = useState(false);
+  const [tplBusy, setTplBusy] = useState(false);
+  const [enhance, setEnhance] = useState({ contrast: 1.2, sharpen: 0.8, exposure: 1.0, saturation: 1.0, bgSuppress: 0.3 });
+  const [enhancedPreview, setEnhancedPreview] = useState<string | null>(null);
+  const rawExtractedRef = useRef<ImageAsset | null>(null);
   const frameRef = useRef<HTMLDivElement>(null);
+  const templateFrameRef = useRef<HTMLDivElement>(null);
+  const templateInputRef = useRef<HTMLInputElement>(null);
   const paintingRef = useRef(false);
   const strokePointsRef = useRef<Array<{ x: number; y: number }>>([]);
 
   useEffect(() => {
     strokePointsRef.current = [];
     setStrokePoints([]);
+    setSelection(null);
   }, [asset.id]);
+
+  useEffect(() => () => {
+    templates.forEach((item) => URL.revokeObjectURL(item.url));
+  }, [templates]);
 
   function pointFromEvent(event: React.PointerEvent<HTMLDivElement>) {
     const frame = frameRef.current;
@@ -1695,18 +1807,232 @@ function CleanupPanel({ asset, onApply }: { asset: ImageAsset; onApply: (stroke:
     }
   }
 
+  function selectionPoint(event: React.PointerEvent<HTMLDivElement>) {
+    const frame = templateFrameRef.current;
+    if (!frame) return null;
+    const rect = frame.getBoundingClientRect();
+    return { x: Math.max(0, Math.min(100, (event.clientX - rect.left) / rect.width * 100)), y: Math.max(0, Math.min(100, (event.clientY - rect.top) / rect.height * 100)) };
+  }
+
+  function startSelection(event: React.PointerEvent<HTMLDivElement>) {
+    if (tplBusy) return;
+    const point = selectionPoint(event);
+    if (!point) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelecting(true);
+    setSelection({ ax: point.x, ay: point.y, bx: point.x, by: point.y });
+  }
+
+  function moveSelection(event: React.PointerEvent<HTMLDivElement>) {
+    if (!selecting) return;
+    const point = selectionPoint(event);
+    if (!point) return;
+    setSelection((current) => (current ? { ...current, bx: point.x, by: point.y } : current));
+  }
+
+  function endSelection(event: React.PointerEvent<HTMLDivElement>) {
+    if (!selecting) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    setSelecting(false);
+    setSelection((current) => (current && Math.abs(current.bx - current.ax) > 1 && Math.abs(current.by - current.ay) > 1 ? current : null));
+  }
+
+  const selectionBox = selection
+    ? {
+        left: Math.min(selection.ax, selection.bx),
+        top: Math.min(selection.ay, selection.by),
+        width: Math.abs(selection.bx - selection.ax),
+        height: Math.abs(selection.by - selection.ay),
+      }
+    : null;
+
+  async function captureTemplate() {
+    if (!selectionBox || tplBusy) return;
+    const widthPx = Math.round(selectionBox.width / 100 * asset.width);
+    const heightPx = Math.round(selectionBox.height / 100 * asset.height);
+    if (widthPx < 8 || heightPx < 8) {
+      setNotice({ type: 'warning', text: '选区太小，请框选完整的水印区域' });
+      return;
+    }
+    try {
+      const cropped = await cropAsset(asset, Math.round(selectionBox.left / 100 * asset.width), Math.round(selectionBox.top / 100 * asset.height), widthPx, heightPx, `水印模板 ${templates.length + 1}`);
+      setTemplates((current) => [...current, cropped]);
+      setSelection(null);
+      setNotice({ type: 'success', text: `已添加模板 ${templates.length + 1}，可继续框选更多区域` });
+    } catch (error) {
+      setNotice({ type: 'error', text: error instanceof Error ? error.message : '模板截取失败' });
+    }
+  }
+
+  async function chooseTemplateFile(file: File | undefined) {
+    if (!file?.type.startsWith('image/')) return;
+    try {
+      const normalized = await normalizeImageOrientation(file);
+      const next = await createAssetFromBlob(normalized, file.name, file);
+      setTemplates((current) => [...current, next]);
+      setNotice({ type: 'success', text: `已导入模板 ${templates.length + 1}` });
+    } catch {
+      setNotice({ type: 'warning', text: '模板图片读取失败' });
+    }
+  }
+
+  function removeTemplate(index: number) {
+    setTemplates((current) => {
+      const next = current.filter((_, i) => i !== index);
+      return next;
+    });
+  }
+
+  function clearTemplates() {
+    setTemplates([]);
+    setSelection(null);
+    rawExtractedRef.current = null;
+    setEnhancedPreview(null);
+  }
+
+  async function extractWatermarkTemplate() {
+    if (templates.length < 3 || tplBusy) return;
+    setTplBusy(true);
+    try {
+      const extracted = await extractWatermarkFromSelections(templates);
+      rawExtractedRef.current = extracted;
+      const enhanced = await enhanceWatermark(extracted, enhance);
+      setTemplates([enhanced]);
+      setEnhancedPreview(enhanced.url);
+      setNotice({ type: 'success', text: `水印模板已提取（${enhanced.width}×${enhanced.height}），已自动增强` });
+    } catch (error) {
+      setNotice({ type: 'warning', text: error instanceof Error ? error.message : '水印提取失败' });
+    } finally {
+      setTplBusy(false);
+    }
+  }
+
+  async function applyEnhancement() {
+    const raw = rawExtractedRef.current;
+    if (!raw || tplBusy) return;
+    setTplBusy(true);
+    try {
+      const enhanced = await enhanceWatermark(raw, enhance);
+      setTemplates([enhanced]);
+      setEnhancedPreview(enhanced.url);
+      setNotice({ type: 'success', text: `增强已应用（${enhanced.width}×${enhanced.height}）` });
+    } catch (error) {
+      setNotice({ type: 'warning', text: error instanceof Error ? error.message : '增强失败' });
+    } finally {
+      setTplBusy(false);
+    }
+  }
+
+  function runTemplate(action: (templates: ImageAsset[], threshold: number, edgePadding: number, fillMode: 'fast' | 'quality') => Promise<void>) {
+    if (templates.length === 0 || tplBusy) return;
+    setTplBusy(true);
+    void action(templates, threshold / 100, edgePadding, fillMode).finally(() => setTplBusy(false));
+  }
+
   const path = strokePoints.map((point) => `${point.x * asset.width / 100},${point.y * asset.height / 100}`).join(' ');
   const previewColor = mode === 'ai' ? '#d4f66e' : '#e78f49';
   const maxBrushSize = Math.max(80, Math.min(320, Math.round(Math.max(asset.width, asset.height) * 0.25)));
-  const overlay = <div className={`editor-tool-overlay cleanup-interaction ${busy ? 'is-busy' : ''}`} ref={frameRef} onPointerDown={(event) => { event.stopPropagation(); startStroke(event); }} onPointerMove={moveStroke} onPointerUp={(event) => void finishStroke(event, true)} onPointerCancel={(event) => void finishStroke(event, false)}>{strokePoints.length > 0 && <svg className="brush-mask-preview" viewBox={`0 0 ${asset.width} ${asset.height}`} preserveAspectRatio="none" aria-hidden="true">{strokePoints.length === 1 ? <circle cx={strokePoints[0].x * asset.width / 100} cy={strokePoints[0].y * asset.height / 100} r={brushSize / 2} fill={previewColor} opacity=".68" /> : <polyline points={path} fill="none" stroke={previewColor} strokeWidth={brushSize} strokeLinecap="round" strokeLinejoin="round" opacity=".68" />}</svg>}{busy && <span className="cleanup-busy">正在填充选区...</span>}</div>;
+  const overlay = tool === 'brush' ? (
+    <div className={`editor-tool-overlay cleanup-interaction ${busy ? 'is-busy' : ''}`} ref={frameRef} onPointerDown={(event) => { event.stopPropagation(); startStroke(event); }} onPointerMove={moveStroke} onPointerUp={(event) => void finishStroke(event, true)} onPointerCancel={(event) => void finishStroke(event, false)}>{strokePoints.length > 0 && <svg className="brush-mask-preview" viewBox={`0 0 ${asset.width} ${asset.height}`} preserveAspectRatio="none" aria-hidden="true">{strokePoints.length === 1 ? <circle cx={strokePoints[0].x * asset.width / 100} cy={strokePoints[0].y * asset.height / 100} r={brushSize / 2} fill={previewColor} opacity=".68" /> : <polyline points={path} fill="none" stroke={previewColor} strokeWidth={brushSize} strokeLinecap="round" strokeLinejoin="round" opacity=".68" />}</svg>}{busy && <span className="cleanup-busy">正在填充选区...</span>}</div>
+  ) : (
+    <div className={`editor-tool-overlay cleanup-interaction cleanup-template-interaction ${tplBusy ? 'is-busy' : ''}`} ref={templateFrameRef} onPointerDown={(event) => { event.stopPropagation(); startSelection(event); }} onPointerMove={moveSelection} onPointerUp={endSelection} onPointerCancel={endSelection}>
+      {selectionBox && <div className="cleanup-template-selection" style={{ left: `${selectionBox.left}%`, top: `${selectionBox.top}%`, width: `${selectionBox.width}%`, height: `${selectionBox.height}%` }}><span>{Math.round(selectionBox.width / 100 * asset.width)} × {Math.round(selectionBox.height / 100 * asset.height)}</span></div>}
+      {tplBusy && <><span className="cleanup-busy">正在识别并去除水印…</span><span className="cleanup-progress"><span className="cleanup-progress-bar" /></span></>}
+    </div>
+  );
   return <>
     {overlayHost && createPortal(overlay, overlayHost)}
-    <PanelIntro title="对象消除" description="涂抹水印、文字或杂物，松开后使用周边画面填充选区。" />
-    <div className="control-section"><div className="section-label">处理方式</div><div className="segmented-grid two"><button className={mode === 'ai' ? 'is-selected' : ''} onClick={() => setMode('ai')}><WandSparkles size={13} /> AI 去水印</button><button className={mode === 'standard' ? 'is-selected' : ''} onClick={() => setMode('standard')}><Eraser size={13} /> 普通消除笔</button></div><div className="direct-tool-caption"><span>{mode === 'ai' ? '多方向纹理智能填充' : '轻量快速周边填充'}</span><span>全程本地</span></div></div>
-    <div className="control-section brush-control-section"><div className="range-heading"><span>画笔大小</span><strong>{brushSize} px</strong></div><input className="range-input" type="range" min="6" max={maxBrushSize} value={Math.min(brushSize, maxBrushSize)} onChange={(event) => setBrushSize(Number(event.target.value))} /></div>
-    <div className="inline-info"><Paintbrush size={16} /><span>直接在中央图片的目标区域按住涂抹，松开后立即处理。</span></div>
-    <div className="inline-info"><ShieldCheck size={16} /><span>{mode === 'ai' ? 'AI 模式会扩大采样范围，复杂背景可能需要分段涂抹。' : '普通模式适合小面积文字和纯色区域。'}</span></div>
-  </>;
+    <PanelIntro title="对象消除" description="手动涂抹去除杂物，或用水印模板自动识别批量去水印。" />
+    <div className="control-section"><div className="section-label">处理方式</div><div className="segmented-grid three"><button type="button" className={tool === 'brush' ? 'is-selected' : ''} onClick={() => setTool('brush')}><Paintbrush size={13} /> 手动涂抹</button><button type="button" className={tool === 'template' ? 'is-selected' : ''} onClick={() => setTool('template')}><ScanSearch size={13} /> 模板去水印</button><button type="button" className={tool === 'extract' ? 'is-selected' : ''} onClick={() => setTool('extract')}><Crop size={13} /> 提取水印</button></div></div>
+    {tool === 'brush' ? <>
+      <div className="control-section"><div className="segmented-grid two"><button type="button" className={mode === 'ai' ? 'is-selected' : ''} onClick={() => setMode('ai')}><WandSparkles size={13} /> AI 去水印</button><button type="button" className={mode === 'standard' ? 'is-selected' : ''} onClick={() => setMode('standard')}><Eraser size={13} /> 普通消除笔</button></div><div className="direct-tool-caption"><span>{mode === 'ai' ? '多方向纹理智能填充' : '轻量快速周边填充'}</span><span>全程本地</span></div></div>
+      <div className="control-section brush-control-section"><div className="range-heading"><span>画笔大小</span><strong>{brushSize} px</strong></div><input className="range-input" type="range" min="6" max={maxBrushSize} value={Math.min(brushSize, maxBrushSize)} onChange={(event) => setBrushSize(Number(event.target.value))} /></div>
+       <div className="inline-info"><Paintbrush size={16} /><span>直接在中央图片的目标区域按住涂抹，松开后立即处理。</span></div>
+       <div className="inline-info"><ShieldCheck size={16} /><span>{mode === 'ai' ? 'AI 模式会扩大采样范围，复杂背景可能需要分段涂抹。' : '普通模式适合小面积文字和纯色区域。'}</span></div>
+     </> : tool === 'extract' ? (
+      <div className="control-section">
+        <div className="section-label">提取水印模板</div>
+        <div className="direct-tool-caption"><span>在左侧图片上框选 3 个以上包含水印的区域（建议不同背景）</span><span>算法会自动提取纯水印模板</span></div>
+        <div className="cleanup-template-actions">
+          <button type="button" className="clothing-upload-button" onClick={() => void captureTemplate()} disabled={!selectionBox || tplBusy}><Crop size={14} /> {templates.length > 0 ? '继续框选' : '框选水印区域'}</button>
+          <button type="button" className="clothing-upload-button" onClick={() => templateInputRef.current?.click()} disabled={tplBusy}><UploadCloud size={14} /> 上传模板</button>
+        </div>
+        {templates.length > 0 && (
+          <div className="control-section" style={{ marginTop: 12 }}>
+            <div className="section-label">已选区域 <span className="muted">（{templates.length} 个，需要至少 3 个）</span></div>
+            <div className="cleanup-template-list">
+              {templates.map((tpl, index) => (
+                <div className="cleanup-template-thumb" key={tpl.id}>
+                  <img src={tpl.url} alt={`区域 ${index + 1}`} />
+                  <span><strong>区域 {index + 1}</strong><small>{tpl.width} × {tpl.height} px</small></span>
+                  <button type="button" className="icon-button" onClick={() => removeTemplate(index)} title="移除"><X size={13} /></button>
+                </div>
+              ))}
+              <button type="button" className="text-button" onClick={clearTemplates}>清空全部</button>
+            </div>
+            <button type="button" className="secondary-button full" disabled={templates.length < 3 || tplBusy} onClick={() => void extractWatermarkTemplate()} style={{ marginTop: 10 }}><ScanSearch size={16} /> 提取水印模板（{templates.length}/3）</button>
+          </div>
+        )}
+        {enhancedPreview && (
+          <div className="control-section" style={{ marginTop: 12 }}>
+            <div className="section-label">增强调整</div>
+            <div className="cleanup-template-list" style={{ marginBottom: 8 }}>
+              <div className="cleanup-template-thumb">
+                <img src={enhancedPreview} alt="增强预览" />
+                <span><strong>增强预览</strong><small>{templates[0]?.width} × {templates[0]?.height} px</small></span>
+              </div>
+            </div>
+            <div className="range-heading"><span>对比度</span><strong>{enhance.contrast.toFixed(2)}</strong></div>
+            <input className="range-input" type="range" min="0.3" max="2.5" step="0.05" value={enhance.contrast} onChange={(event) => setEnhance((current) => ({ ...current, contrast: Number(event.target.value) }))} />
+            <div className="range-heading"><span>锐化</span><strong>{enhance.sharpen.toFixed(2)}</strong></div>
+            <input className="range-input" type="range" min="0" max="3" step="0.1" value={enhance.sharpen} onChange={(event) => setEnhance((current) => ({ ...current, sharpen: Number(event.target.value) }))} />
+            <div className="range-heading"><span>曝光</span><strong>{enhance.exposure.toFixed(2)}</strong></div>
+            <input className="range-input" type="range" min="0.5" max="2.0" step="0.05" value={enhance.exposure} onChange={(event) => setEnhance((current) => ({ ...current, exposure: Number(event.target.value) }))} />
+            <div className="range-heading"><span>饱和度</span><strong>{enhance.saturation.toFixed(2)}</strong></div>
+            <input className="range-input" type="range" min="0" max="2.5" step="0.05" value={enhance.saturation} onChange={(event) => setEnhance((current) => ({ ...current, saturation: Number(event.target.value) }))} />
+            <div className="range-heading"><span>背景抑制</span><strong>{enhance.bgSuppress.toFixed(2)}</strong></div>
+            <input className="range-input" type="range" min="0" max="1" step="0.02" value={enhance.bgSuppress} onChange={(event) => setEnhance((current) => ({ ...current, bgSuppress: Number(event.target.value) }))} />
+            <button type="button" className="secondary-button full" disabled={tplBusy || !rawExtractedRef.current} onClick={() => void applyEnhancement()} style={{ marginTop: 10 }}><ScanSearch size={16} /> 应用增强</button>
+          </div>
+        )}
+      </div>
+    ) : (
+      <>
+      <input ref={templateInputRef} className="visually-hidden" type="file" accept="image/*" onChange={(event) => { void chooseTemplateFile(event.target.files?.[0]); event.currentTarget.value = ''; }} />
+      <div className="control-section">
+        <div className="section-label">水印模板 {templates.length > 0 && <span className="muted">（{templates.length} 个区域）</span>}</div>
+        {templates.length > 0 ? (
+          <div className="cleanup-template-list">
+            {templates.map((tpl, index) => (
+              <div className="cleanup-template-thumb" key={tpl.id}>
+                <img src={tpl.url} alt={`水印模板 ${index + 1}`} />
+                <span><strong>{tpl.name}</strong><small>{tpl.width} × {tpl.height} px</small></span>
+                <button type="button" className="icon-button" onClick={() => removeTemplate(index)} title="移除此模板"><X size={13} /></button>
+              </div>
+            ))}
+            <button type="button" className="text-button" onClick={clearTemplates}>清空全部</button>
+          </div>
+        ) : (
+          <div className="direct-tool-caption"><span>尚未选择水印模板</span><span>在左侧图片上框选水印区域，可框选多块提升识别率，或上传模板小图</span></div>
+        )}
+        <div className="cleanup-template-actions">
+          <button type="button" className="clothing-upload-button" onClick={() => void captureTemplate()} disabled={!selectionBox || tplBusy}><Crop size={14} /> {templates.length > 0 ? '继续框选' : '框选水印'}</button>
+          <button type="button" className="clothing-upload-button" onClick={() => templateInputRef.current?.click()} disabled={tplBusy}><UploadCloud size={14} /> 上传模板</button>
+        </div>
+      </div>
+      <div className="control-section"><div className="range-heading"><span>匹配灵敏度</span><strong>{threshold}%</strong></div><input className="range-input" type="range" min="50" max="98" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} /><div className="range-labels"><span>仅高相似</span><span>宽松匹配</span></div></div>
+      <div className="control-section"><div className="range-heading"><span>边缘扩展</span><strong>{edgePadding} px</strong></div><input className="range-input" type="range" min="0" max="40" value={edgePadding} onChange={(event) => setEdgePadding(Number(event.target.value))} /><div className="range-labels"><span>贴合边界</span><span>向外扩展</span></div></div>
+      <div className="control-section"><div className="section-label">填充方式</div><div className="segmented-grid two"><button type="button" className={fillMode === 'fast' ? 'is-selected' : ''} onClick={() => setFillMode('fast')}><Zap size={13} /> 普通填充</button><button type="button" className={fillMode === 'quality' ? 'is-selected' : ''} onClick={() => setFillMode('quality')}><WandSparkles size={13} /> AI 填充</button></div><div className="direct-tool-caption"><span>{fillMode === 'fast' ? '快速处理，适合简单背景' : '多方向纹理智能填充，效果更好'}</span><span>全程本地</span></div></div>
+      <div className="inline-info"><ScanSearch size={16} /><span>自动识别图中所有相同水印（含平铺重复），多块模板可提升识别率。</span></div>
+      <div className="metadata-actions">
+        <button type="button" className="secondary-button full" disabled={templates.length === 0 || tplBusy} onClick={() => runTemplate(onApplyTemplate)}><ScanSearch size={16} /> 识别并去除当前图片</button>
+        <button type="button" className="secondary-button full" disabled={templates.length === 0 || tplBusy || documentCount < 1} onClick={() => runTemplate(onApplyTemplateBatch)}><Layers3 size={16} /> 批量处理全部（{documentCount} 张）</button>
+      </div>
+      <div className="inline-info"><Info size={16} /><span>批量模式会逐张识别并替换工作区全部文档，耗时取决于图片数量。</span></div>
+    </>
+  )}
+</>;
 }
 
 function AiModelPanel({ task, asset, onApply, setNotice, compact = false }: { task: AiTask; asset: ImageAsset; onApply: (request: AiRequest) => Promise<void>; setNotice: (notice: Notice) => void; compact?: boolean }) {
