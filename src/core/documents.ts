@@ -54,7 +54,13 @@ export async function flattenDocument(doc: PhotoDocument): Promise<ImageAsset> {
       element.onerror = () => reject(new Error(`图层 ${layer.name} 解码失败`));
       element.src = layer.url;
     });
-    context.drawImage(image, layer.offsetX, layer.offsetY, layer.width, layer.height);
+    context.save();
+    context.globalAlpha = layer.opacity ?? 1;
+    context.translate(layer.offsetX + layer.width / 2, layer.offsetY + layer.height / 2);
+    context.rotate((layer.rotation ?? 0) * Math.PI / 180);
+    context.scale(layer.scaleX ?? 1, layer.scaleY ?? 1);
+    context.drawImage(image, -layer.width / 2, -layer.height / 2, layer.width, layer.height);
+    context.restore();
   }
   const blob = await canvasToBlob(canvas, 'image/png');
   const url = URL.createObjectURL(blob);

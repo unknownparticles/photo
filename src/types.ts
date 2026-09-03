@@ -14,7 +14,8 @@ export type ToolId =
   | 'batch'
   | 'gif'
   | 'id-photo'
-  | 'qrcode';
+  | 'qrcode'
+  | 'collage';
 
 export type ExportFormat = 'image/jpeg' | 'image/png' | 'image/webp' | 'image/avif' | 'image/gif';
 
@@ -29,6 +30,10 @@ export interface Layer {
   visible: boolean;
   offsetX: number;
   offsetY: number;
+  rotation?: number;
+  scaleX?: number;
+  scaleY?: number;
+  opacity?: number;
 }
 
 export interface PhotoDocument {

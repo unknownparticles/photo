@@ -88,6 +88,7 @@ import { extractWatermarkFromSelections, removeWatermarkByTemplate, removeWaterm
 import type { AiCapability, AiModelId, AiRequest, AiTask, BackgroundBrushStroke, BackgroundColorSample, BatchCropAlignment, BatchOptions, BatchProgress, CleanupBrushStroke, ExportFormat, IdPhotoClothingLayer, IdPhotoMattingPreview, ImageAsset, ImageOperation, Layer, LocalBackgroundRemovalOptions, PhotoDocument, SplitLine, ToolId, WatermarkOptions } from './types';
 import { DirectCropPanel, DirectSplitPanel, IdPhotoPanel } from './components/DirectImageControls';
 import { QrCodePanel } from './components/QrCodePanel';
+import { CollagePanel } from './components/CollagePanel';
 import { EditorOverlayContext, useEditorOverlay } from './components/EditorOverlay';
 import { getStoredLanguagePreference, observeDocumentLocale, resolveLocale, setStoredLanguagePreference } from './i18n';
 import type { LanguagePreference } from './i18n';
@@ -128,6 +129,7 @@ const tools: ToolDefinition[] = [
   { id: 'gif', label: 'GIF', description: '动图帧与导出', icon: Film, category: '工作流', accent: 'purple' },
   { id: 'id-photo', label: '证件照', description: '规格快速出片', icon: BadgeCheck, category: '工作流', accent: 'red' },
   { id: 'qrcode', label: '二维码', description: '生成自定义二维码', icon: QrCode, category: '工作流', accent: 'emerald' },
+  { id: 'collage', label: '拼贴', description: '底图加贴纸自由拼贴', icon: Combine, category: '工作流', accent: 'pink' },
 ];
 
 const presets = [
@@ -803,6 +805,17 @@ async function previewIdPhoto(values: { x: number; y: number; width: number; hei
     }, '生成二维码', asset.name);
   }
 
+  async function applyCollageExport(asset: ImageAsset) {
+    if (!activeDocument) return;
+    const doc = documentFromAsset(asset);
+    doc.name = `拼贴-${doc.id.slice(0, 6)}`;
+    checkpoint();
+    addDocuments([doc]);
+    setActiveDocument(doc.id);
+    addHistory({ name: doc.name, label: '自由拼贴', detail: '导出拼贴' });
+    setNotice({ type: 'success', text: '拼贴已生成为新文档' });
+  }
+
   async function applyMetadataValue(values: Record<string, string>) {
     if (!activeDocument) return;
     const flat = await flattenDocument(activeDocument);
@@ -1055,6 +1068,7 @@ async function previewIdPhoto(values: { x: number; y: number; width: number; hei
           onCleanupTemplateAll={applyCleanupTemplateAll}
           onWatermark={applyWatermarkValue}
           onQrGenerate={applyQrGenerate}
+          onCollageExport={applyCollageExport}
           onMetadata={applyMetadataValue}
           onClearMetadata={clearMetadataValue}
           onExportGif={exportGif}
@@ -1217,6 +1231,7 @@ function Workspace({
   onCleanupTemplateAll: (templates: ImageAsset[], threshold: number, edgePadding: number, fillMode: 'fast' | 'quality') => Promise<void>;
   onWatermark: (options: WatermarkOptions) => Promise<void>;
   onQrGenerate: (asset: ImageAsset) => Promise<void>;
+  onCollageExport: (asset: ImageAsset) => Promise<void>;
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
   onExportGif: () => Promise<void>;
@@ -1279,7 +1294,7 @@ function Workspace({
       <div className="workspace-layout">
         <aside className="tool-sidebar"><div className="sidebar-title"><PanelLeft size={15} /><span>工具</span></div><div className="sidebar-list">{tools.map((tool) => { const ToolIcon = tool.icon; return <button className={`sidebar-tool ${activeTool === tool.id ? 'is-active' : ''}`} data-tool-id={tool.id} key={tool.id} onClick={() => onSelectTool(tool.id)} title={tool.description}><ToolIcon size={17} /><span>{tool.label}</span>{activeTool === tool.id && <span className="active-bar" />}</button>; })}</div><div className="sidebar-bottom"><ShieldCheck size={16} /><small>本地模式<br />Local only</small></div></aside>
         <section className="preview-column"><div className="preview-toolbar"><span><span className="live-dot" /> 直接编辑</span>{renamingDocument && activeDocument ? <span className="doc-rename"><input autoFocus value={documentNameDraft} onChange={(event) => setDocumentNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') commitDocumentRename(); if (event.key === 'Escape') setRenamingDocument(false); }} /><button type="button" className="text-button" onClick={commitDocumentRename}>确定</button><button type="button" className="text-button" onClick={() => setRenamingDocument(false)}>取消</button></span> : <button type="button" className="doc-name-button" title="点击重命名文档（同时是导出文件名）" onClick={startDocumentRename}>{activeDocument?.name ?? '未选择文档'}<Pencil size={12} /></button>}<span>{activeDocument ? `${activeDocument.canvasWidth} × ${activeDocument.canvasHeight}` : ''}</span></div><div className={`preview-stage ${canvasAspectPortrait ? 'is-portrait' : 'is-landscape'}`}><div className="stage-grid" />{activeDocument ? <PreviewImage document={activeDocument} editValues={activeTool === 'edit' ? editPreview : undefined} compare={compare} onOverlayHost={setOverlayHost} /> : <div className="preview-empty"><ImagePlus size={32} /><span>选择一张图片开始</span></div>}{originReady && <button type="button" className={`preview-compare-pill ${compareActive ? 'is-engaged' : ''}`} aria-pressed={compareLocked} onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); comparePressStartRef.current = performance.now(); setComparePeeking(true); }} onPointerUp={() => endComparePress(true)} onPointerCancel={() => endComparePress(false)}><ArrowRightLeft size={13} /><span>{compareActive ? '原图对比中 · 点按退出' : '按住看原图'}</span></button>}<div className="preview-badge"><CheckCircle2 size={14} /> 本地处理</div></div><div className="preview-footer"><div className="preview-file"><FileImage size={16} /><span><strong>{activeDocument?.name ?? '未选择文件'}</strong><small>{activeDocument ? `${activeDocument.layers.filter((layer) => layer.visible).length}/${activeDocument.layers.length} 图层可见` : '拖入图片或点击添加'}</small></span></div><div className="preview-controls"><button className="icon-button" title="帮助"><CircleHelp size={16} /></button><button className="icon-button" title="撤销上一步操作" aria-label="撤销上一步操作" disabled={!canUndo} onClick={onUndo}><Undo2 size={16} /></button><button className="icon-button" title="重做上一步操作" aria-label="重做上一步操作" disabled={!canRedo} onClick={onRedo}><Redo2 size={16} /></button>{activeDocument && <button className="icon-button" title="删除当前文档" aria-label="删除当前文档" onClick={() => onDeleteAsset(activeDocument.id)}><Trash2 size={16} /></button>}</div></div></section>
-        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div>{activeDocument && <LayerPanel document={activeDocument} onSelectLayer={(layerId) => onUpdateDocument((current) => ({ ...current, activeLayerId: layerId }))} onToggleLayer={(layerId) => onUpdateDocument((current) => ({ ...current, edited: true, layers: current.layers.map((layer) => (layer.id === layerId ? { ...layer, visible: !layer.visible } : layer)) }))} onRenameLayer={(layerId, name) => onUpdateDocument((current) => ({ ...current, layers: current.layers.map((layer) => (layer.id === layerId ? { ...layer, name } : layer)) }))} onDeleteLayer={(layerId) => onUpdateDocument((current) => { const layers = current.layers.filter((layer) => layer.id !== layerId); return { ...current, layers, activeLayerId: current.activeLayerId === layerId ? layers[0]?.id ?? null : current.activeLayerId }; })} onExportLayer={async (layerId) => { const layer = activeDocument.layers.find((item) => item.id === layerId); if (!layer) return; await exportImage(asProcessedAsset({ id: layer.id, name: layer.name, type: layer.type, size: layer.blob.size, width: layer.width, height: layer.height, originalWidth: layer.width, originalHeight: layer.height, blob: layer.blob, url: layer.url }), { format: 'image/png', quality: 0.92, background: '#ffffff', preserveTransparency: true, preserveMetadata: false }); setNotice({ type: 'success', text: `已下载图层 ${layer.name}` }); }} />}<div className="control-scroll"><ToolPanel tool={activeTool} asset={viewAsset} onIdPhotoStage={onIdPhotoStage} onIdPhotoStageUpdate={onIdPhotoStageUpdate} onResize={onResize} onCrop={onCrop} onIdPhotoPreview={onIdPhotoPreview} onIdPhotoBrush={onIdPhotoBrush} onIdPhotoClothing={onIdPhotoClothing} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onEditPreview={setEditPreview} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onCleanup={onCleanup} onCleanupTemplate={onCleanupTemplate} onCleanupTemplateAll={onCleanupTemplateAll} documentCount={documents.length} onWatermark={onWatermark} onQrGenerate={onQrGenerate} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} batchProgress={batchProgress} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
+        <aside className="control-column"><div className="control-heading"><div className="control-icon"><Icon size={19} /></div><div><span className="eyebrow">CURRENT TOOL</span><h2>{activeToolDefinition.label}</h2></div><button className="icon-button mobile-close" title="关闭面板"><X size={17} /></button></div>{activeDocument && <LayerPanel document={activeDocument} onSelectLayer={(layerId) => onUpdateDocument((current) => ({ ...current, activeLayerId: layerId }))} onToggleLayer={(layerId) => onUpdateDocument((current) => ({ ...current, edited: true, layers: current.layers.map((layer) => (layer.id === layerId ? { ...layer, visible: !layer.visible } : layer)) }))} onRenameLayer={(layerId, name) => onUpdateDocument((current) => ({ ...current, layers: current.layers.map((layer) => (layer.id === layerId ? { ...layer, name } : layer)) }))} onDeleteLayer={(layerId) => onUpdateDocument((current) => { const layers = current.layers.filter((layer) => layer.id !== layerId); return { ...current, layers, activeLayerId: current.activeLayerId === layerId ? layers[0]?.id ?? null : current.activeLayerId }; })} onExportLayer={async (layerId) => { const layer = activeDocument.layers.find((item) => item.id === layerId); if (!layer) return; await exportImage(asProcessedAsset({ id: layer.id, name: layer.name, type: layer.type, size: layer.blob.size, width: layer.width, height: layer.height, originalWidth: layer.width, originalHeight: layer.height, blob: layer.blob, url: layer.url }), { format: 'image/png', quality: 0.92, background: '#ffffff', preserveTransparency: true, preserveMetadata: false }); setNotice({ type: 'success', text: `已下载图层 ${layer.name}` }); }} />}<div className="control-scroll"><ToolPanel tool={activeTool} asset={viewAsset} onIdPhotoStage={onIdPhotoStage} onIdPhotoStageUpdate={onIdPhotoStageUpdate} onResize={onResize} onCrop={onCrop} onIdPhotoPreview={onIdPhotoPreview} onIdPhotoBrush={onIdPhotoBrush} onIdPhotoClothing={onIdPhotoClothing} onIdPhoto={onIdPhoto} onSplit={onSplit} onMerge={onMerge} onEncode={onEncode} onEdit={onEdit} onEditPreview={setEditPreview} onMattingApply={onMattingApply} onMattingBrushApply={onMattingBrushApply} onAiApply={onAiApply} onCleanup={onCleanup} onCleanupTemplate={onCleanupTemplate} onCleanupTemplateAll={onCleanupTemplateAll} documentCount={documents.length} onWatermark={onWatermark} onQrGenerate={onQrGenerate} onCollageExport={onCollageExport} onMetadata={onMetadata} onClearMetadata={onClearMetadata} onExportGif={onExportGif} onBatch={onBatch} batchProgress={batchProgress} setNotice={setNotice} /></div><div className="control-footer"><span><ShieldCheck size={14} /> 本地安全处理</span><button className="help-link"><CircleHelp size={14} /> 需要帮助</button></div></aside>
       </div>
     </main>
     </EditorOverlayContext.Provider>
@@ -1355,6 +1370,7 @@ function ToolPanel({ tool, asset, onIdPhotoStage, onIdPhotoStageUpdate, onResize
   documentCount: number;
   onWatermark: (options: WatermarkOptions) => Promise<void>;
   onQrGenerate: (asset: ImageAsset) => Promise<void>;
+  onCollageExport: (asset: ImageAsset) => Promise<void>;
   onMetadata: (values: Record<string, string>) => Promise<void>;
   onClearMetadata: () => Promise<void>;
   onExportGif: () => Promise<void>;
@@ -1364,7 +1380,7 @@ function ToolPanel({ tool, asset, onIdPhotoStage, onIdPhotoStageUpdate, onResize
   batchProgress: BatchProgress;
   setNotice: (notice: Notice) => void;
 }) {
-  if (!asset && tool !== 'qrcode') return <EmptyPanel />;
+  if (!asset && tool !== 'qrcode' && tool !== 'collage') return <EmptyPanel />;
   switch (tool) {
     case 'resize': return <ResizePanel asset={asset} onApply={onResize} />;
     case 'crop': return <CropPanel asset={asset} onApply={onCrop} />;
@@ -1382,6 +1398,7 @@ function ToolPanel({ tool, asset, onIdPhotoStage, onIdPhotoStageUpdate, onResize
     case 'gif': return <GifPanel count={0} onApply={onExportGif} />;
     case 'id-photo': return <IdPhotoPanel key={asset?.id ?? 'none'} asset={asset} onPreview={onIdPhotoPreview} onBrushApply={onIdPhotoBrush} onLoadClothing={onIdPhotoClothing} onApply={onIdPhoto} onStage={onIdPhotoStage} onStageUpdate={onIdPhotoStageUpdate} setNotice={setNotice} />;
     case 'qrcode': return <QrCodePanel onGenerate={onQrGenerate} />;
+    case 'collage': return <CollagePanel asset={asset} onExport={onCollageExport} setNotice={setNotice} />;
     default: return <EmptyPanel />;
   }
 }
