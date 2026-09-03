@@ -1,5 +1,5 @@
 import { QRCode } from 'qrcode';
-import { canvasToBlob, createAssetFromBlob, loadImage } from './image';
+import { createAssetFromBlob, loadImage } from './image';
 import type { ImageAsset } from '../types';
 
 export interface QrCodeOptions {

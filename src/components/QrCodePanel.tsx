@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ImageAsset } from '../types';
 import { generateQrCodeAsset, generateQrCodeDataURL } from '../core/qrcode';
 import { Download, ImagePlus, QrCode } from 'lucide-react';
@@ -27,7 +27,7 @@ export function QrCodePanel({ onGenerate }: { onGenerate: (asset: ImageAsset) =>
     };
     void run();
     return () => { cancelled = true; };
-  }, [text, width, fgColor, bgColor, logo?.dataUrl, logo?.size]);
+  }, [text, width, fgColor, bgColor, logo, logo?.dataUrl, logo?.size]);
 
   async function handleGenerate() {
     setGenerating(true);
