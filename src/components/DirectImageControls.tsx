@@ -10,6 +10,8 @@ type CropRect = { x: number; y: number; width: number; height: number };
 type CropHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 type IdPhotoSize = { label: string; ratio: number };
 type ClothingCategory = 'suit' | 'blazer' | 'shirt' | 'tie-shirt';
+type StageTarget = { kind: 'layer' | 'subject'; id?: string };
+type HitSampler = { canvas: HTMLCanvasElement; context: CanvasRenderingContext2D };
 
 const clothingCategories: Array<{ id: ClothingCategory; label: string; count: number }> = [
   { id: 'suit', label: '西服', count: 10 },
@@ -29,6 +31,43 @@ function clampValue(value: number, minimum: number, maximum: number) {
 function pointerInFrame(event: ReactPointerEvent<HTMLElement>, frame: HTMLDivElement) {
   const rect = frame.getBoundingClientRect();
   return { x: ((event.clientX - rect.left) / rect.width) * 100, y: ((event.clientY - rect.top) / rect.height) * 100 };
+}
+
+const hitSamplerCache = new Map<string, Promise<HitSampler | null>>();
+
+function getHitSampler(url: string) {
+  let pending = hitSamplerCache.get(url);
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const element = new Image();
+          element.onload = () => resolve(element);
+          element.onerror = reject;
+          element.src = url;
+        });
+        const scale = Math.min(1, 96 / Math.max(image.naturalWidth, image.naturalHeight));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        if (!context) return null;
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        return { canvas, context };
+      } catch {
+        return null;
+      }
+    })();
+    hitSamplerCache.set(url, pending);
+  }
+  return pending;
+}
+
+function alphaAt(sampler: HitSampler | null, u: number, v: number) {
+  if (!sampler) return true;
+  const x = clampValue(Math.round(u * (sampler.canvas.width - 1)), 0, sampler.canvas.width - 1);
+  const y = clampValue(Math.round(v * (sampler.canvas.height - 1)), 0, sampler.canvas.height - 1);
+  return sampler.context.getImageData(x, y, 1, 1).data[3] > 16;
 }
 
 export function DirectCropPanel({ asset, onApply }: { asset: ImageAsset; onApply: (values: CropRect) => Promise<void> }) {
@@ -170,13 +209,16 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onLoadClothing, o
   const [subjectOffset, setSubjectOffset] = useState({ x: 0, y: 0 });
   const [subjectScale, setSubjectScale] = useState(100);
   const [backgroundImage, setBackgroundImage] = useState<ImageAsset | null>(null);
-  const subjectDragRef = useRef<{ startX: number; startY: number; baseX: number; baseY: number } | null>(null);
+  const subjectDragRef = useRef<{ pointerId: number; startX: number; startY: number; baseX: number; baseY: number } | null>(null);
   const subjectResizeRef = useRef<{ startX: number; startScale: number } | null>(null);
   const [values, setValues] = useState<CropRect>(() => initialIdPhotoCrop(asset.width, asset.height, sizes[0].ratio));
   const frameRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const dragRef = useRef<{ mode: 'move' | 'resize'; handle: CropHandle; start: { x: number; y: number }; initial: CropRect } | null>(null);
-  const clothingDragRef = useRef<{ id: string; startX: number; startY: number; x: number; y: number } | null>(null);
+  const composeFrameRef = useRef<HTMLDivElement>(null);
+  const stagePointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const pinchRef = useRef<{ kind: 'layer' | 'subject'; id?: string; startDist: number; startValue: number } | null>(null);
+  const clothingDragRef = useRef<{ id: string; pointerId: number; startX: number; startY: number; x: number; y: number } | null>(null);
   const clothingResizeRef = useRef<{ id: string; startX: number; startWidth: number } | null>(null);
   const clothingInputRef = useRef<HTMLInputElement>(null);
   const bgFileRef = useRef<HTMLInputElement>(null);
@@ -363,6 +405,11 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onLoadClothing, o
     return () => frame.removeEventListener('wheel', onWheel);
   }, [preview, step, scheduleComposite]);
 
+  useEffect(() => {
+    if (!preview || step < 1) return;
+    [preview.subject.url, ...clothingLayers.map((layer) => layer.asset.url)].forEach((url) => void getHitSampler(url));
+  }, [preview, step, clothingLayers]);
+
   function pickBackgroundColor(event: ReactPointerEvent<HTMLDivElement>) {
     if (interaction !== 'sample' || mattingMode !== 'local') return;
     event.stopPropagation();
@@ -396,15 +443,154 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onLoadClothing, o
     setStrokePoints(points);
   }
 
-  function startSubjectDrag(event: ReactPointerEvent<HTMLDivElement>) {
-    if (step !== 1 && step !== 2 || brushEnabled) return;
+  async function targetsAt(clientX: number, clientY: number): Promise<StageTarget[]> {
+    const frame = composeFrameRef.current;
+    if (!frame || !preview) return [];
+    const entries: Array<StageTarget & { url: string; el: Element | null }> = [];
+    [...clothingLayers].reverse().filter((layer) => layer.placement === 'front' && layer.visible).forEach((layer) => entries.push({ kind: 'layer', id: layer.id, url: layer.asset.url, el: frame.querySelector(`[data-layer-id="${layer.id}"]`) }));
+    entries.push({ kind: 'subject', url: preview.subject.url, el: frame.querySelector('.id-photo-subject-wrap') });
+    [...clothingLayers].reverse().filter((layer) => layer.placement === 'behind' && layer.visible).forEach((layer) => entries.push({ kind: 'layer', id: layer.id, url: layer.asset.url, el: frame.querySelector(`[data-layer-id="${layer.id}"]`) }));
+    const hits: StageTarget[] = [];
+    for (const entry of entries) {
+      if (!entry.el) continue;
+      const box = entry.el.getBoundingClientRect();
+      if (clientX < box.left || clientX > box.right || clientY < box.top || clientY > box.bottom) continue;
+      const u = (clientX - box.left) / Math.max(1, box.width);
+      const v = (clientY - box.top) / Math.max(1, box.height);
+      if (alphaAt(await getHitSampler(entry.url), u, v)) hits.push({ kind: entry.kind, id: entry.id });
+    }
+    return hits;
+  }
+
+  async function handleStagePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (brushEnabled) {
+      startBrush(event);
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    subjectDragRef.current = { startX: event.clientX, startY: event.clientY, baseX: subjectOffset.x, baseY: subjectOffset.y };
+    const frame = composeFrameRef.current;
+    if (!frame) return;
+    frame.setPointerCapture(event.pointerId);
+    stagePointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (stagePointersRef.current.size >= 2) {
+      beginPinch();
+      return;
+    }
+    const hits = await targetsAt(event.clientX, event.clientY);
+    if (!stagePointersRef.current.has(event.pointerId) || stagePointersRef.current.size !== 1) return;
+    const selected = clothingLayers.find((layer) => layer.id === activeLayerId && layer.visible) ?? null;
+    const selectedHit = selected ? hits.some((hit) => hit.kind === 'layer' && hit.id === selected.id) : false;
+    const other = hits.find((hit) => !(selected && hit.kind === 'layer' && hit.id === selected.id));
+    if (other && !selectedHit) {
+      if (other.kind === 'layer' && other.id) {
+        setActiveLayerId(other.id);
+        beginClothingDrag(other.id, event.pointerId, event.clientX, event.clientY);
+      } else {
+        setActiveLayerId(null);
+        beginSubjectDrag(event.pointerId, event.clientX, event.clientY);
+      }
+      return;
+    }
+    if (selectedHit && selected) {
+      beginClothingDrag(selected.id, event.pointerId, event.clientX, event.clientY);
+      return;
+    }
+    if (hits.some((hit) => hit.kind === 'subject')) {
+      setActiveLayerId(null);
+      beginSubjectDrag(event.pointerId, event.clientX, event.clientY);
+    }
+  }
+
+  function beginClothingDrag(id: string, pointerId: number, clientX: number, clientY: number) {
+    const layer = clothingLayers.find((item) => item.id === id);
+    if (!layer) return;
+    clothingDragRef.current = { id, pointerId, startX: clientX, startY: clientY, x: layer.x, y: layer.y };
+  }
+
+  function beginSubjectDrag(pointerId: number, clientX: number, clientY: number) {
+    subjectDragRef.current = { pointerId, startX: clientX, startY: clientY, baseX: subjectOffset.x, baseY: subjectOffset.y };
+  }
+
+  function beginPinch() {
+    const [a, b] = Array.from(stagePointersRef.current.values());
+    if (!a || !b) return;
+    let kind: 'layer' | 'subject' = 'subject';
+    let id: string | undefined;
+    let startValue = subjectScale;
+    if (clothingDragRef.current) {
+      kind = 'layer';
+      id = clothingDragRef.current.id;
+      startValue = clothingLayers.find((layer) => layer.id === id)?.width ?? 90;
+    } else if (subjectDragRef.current) {
+      kind = 'subject';
+    } else {
+      const selected = clothingLayers.find((layer) => layer.id === activeLayerId && layer.visible);
+      if (selected) {
+        kind = 'layer';
+        id = selected.id;
+        startValue = selected.width;
+      }
+    }
+    clothingDragRef.current = null;
+    subjectDragRef.current = null;
+    pinchRef.current = { kind, id, startDist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), startValue };
+  }
+
+  function handleStagePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (brushEnabled) {
+      moveBrush(event);
+      return;
+    }
+    const tracked = stagePointersRef.current.get(event.pointerId);
+    if (tracked) {
+      tracked.x = event.clientX;
+      tracked.y = event.clientY;
+    }
+    const pinch = pinchRef.current;
+    if (pinch) {
+      if (stagePointersRef.current.size >= 2) {
+        const [a, b] = Array.from(stagePointersRef.current.values());
+        const ratio = Math.hypot(a.x - b.x, a.y - b.y) / pinch.startDist;
+        if (pinch.kind === 'layer' && pinch.id) updateLayer(pinch.id, { width: clampValue(pinch.startValue * ratio, 10, 220) });
+        else setSubjectScale(clampValue(pinch.startValue * ratio, 20, 300));
+        scheduleComposite();
+      }
+      return;
+    }
+    const frame = composeFrameRef.current;
+    const drag = clothingDragRef.current;
+    if (drag && frame && event.pointerId === drag.pointerId) {
+      updateLayer(drag.id, {
+        x: clampValue(drag.x + (event.clientX - drag.startX) / frame.clientWidth * 100, -50, 100),
+        y: clampValue(drag.y + (event.clientY - drag.startY) / frame.clientHeight * 100, -50, 100),
+      });
+      scheduleComposite();
+      return;
+    }
+    const subject = subjectDragRef.current;
+    if (subject && frame && event.pointerId === subject.pointerId) {
+      setSubjectOffset({
+        x: clampValue(subject.baseX + (event.clientX - subject.startX) / frame.clientWidth * 100, -40, 40),
+        y: clampValue(subject.baseY + (event.clientY - subject.startY) / frame.clientHeight * 100, -40, 40),
+      });
+      scheduleComposite();
+    }
+  }
+
+  function handleStagePointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    if (brushEnabled) {
+      void finishBrush(event);
+      return;
+    }
+    stagePointersRef.current.delete(event.pointerId);
+    if (pinchRef.current && stagePointersRef.current.size < 2) pinchRef.current = null;
+    if (clothingDragRef.current?.pointerId === event.pointerId) clothingDragRef.current = null;
+    if (subjectDragRef.current?.pointerId === event.pointerId) subjectDragRef.current = null;
   }
 
   function startSubjectResize(event: ReactPointerEvent<HTMLElement>) {
+    if (pinchRef.current || stagePointersRef.current.size >= 2) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -413,7 +599,7 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onLoadClothing, o
 
   function moveSubjectResize(event: ReactPointerEvent<HTMLElement>) {
     const resize = subjectResizeRef.current;
-    const frame = document.getElementById('id-photo-stage-frame');
+    const frame = composeFrameRef.current;
     if (!resize || !frame) return;
     setSubjectScale(clampValue(resize.startScale + (event.clientX - resize.startX) / frame.clientWidth * 100, 20, 300));
     scheduleComposite();
@@ -422,22 +608,6 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onLoadClothing, o
   function endSubjectResize(event: ReactPointerEvent<HTMLElement>) {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     subjectResizeRef.current = null;
-  }
-
-  function moveSubjectDrag(event: ReactPointerEvent<HTMLImageElement>) {
-    const drag = subjectDragRef.current;
-    const frame = document.getElementById('id-photo-stage-frame');
-    if (!drag || !frame) return;
-    setSubjectOffset({
-      x: clampValue(drag.baseX + (event.clientX - drag.startX) / frame.clientWidth * 100, -40, 40),
-      y: clampValue(drag.baseY + (event.clientY - drag.startY) / frame.clientHeight * 100, -40, 40),
-    });
-    scheduleComposite();
-  }
-
-  function endSubjectDrag(event: ReactPointerEvent<HTMLImageElement>) {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    subjectDragRef.current = null;
   }
 
   function startBrush(event: ReactPointerEvent<HTMLDivElement>) {
@@ -490,30 +660,8 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onLoadClothing, o
     setClothingLayers((current) => current.map((layer) => layer.id === id ? { ...layer, ...patch } : layer));
   }
 
-  function startClothingDrag(event: ReactPointerEvent<HTMLDivElement>, layer: IdPhotoClothingLayer) {
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    clothingDragRef.current = { id: layer.id, startX: event.clientX, startY: event.clientY, x: layer.x, y: layer.y };
-    setActiveLayerId(layer.id);
-  }
-
-  function moveClothing(event: ReactPointerEvent<HTMLDivElement>) {
-    const drag = clothingDragRef.current;
-    const frame = document.getElementById('id-photo-stage-frame');
-    if (!drag || !frame) return;
-    updateLayer(drag.id, {
-      x: clampValue(drag.x + (event.clientX - drag.startX) / frame.clientWidth * 100, -50, 100),
-      y: clampValue(drag.y + (event.clientY - drag.startY) / frame.clientHeight * 100, -50, 100),
-    });
-  }
-
-  function endClothingDrag(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    clothingDragRef.current = null;
-  }
-
   function startClothingResize(event: ReactPointerEvent<HTMLElement>, layer: IdPhotoClothingLayer) {
+    if (pinchRef.current || stagePointersRef.current.size >= 2) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -523,7 +671,7 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onLoadClothing, o
 
   function moveClothingResize(event: ReactPointerEvent<HTMLElement>) {
     const resize = clothingResizeRef.current;
-    const frame = document.getElementById('id-photo-stage-frame');
+    const frame = composeFrameRef.current;
     if (!resize || !frame) return;
     updateLayer(resize.id, { width: clampValue(resize.startWidth + (event.clientX - resize.startX) / frame.clientWidth * 100, 10, 220) });
   }
@@ -539,18 +687,6 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onLoadClothing, o
   const brushPath = strokePoints.map((point) => `${point.x * subjectWidth / 100},${point.y * subjectHeight / 100}`).join(' ');
   const maxBrushSize = Math.max(80, Math.min(800, Math.round(Math.max(subjectWidth, subjectHeight) * 0.4)));
   const cropMode = step === 0 && (framing || !preview);
-  const stageFrameProps = cropMode
-    ? {
-        id: 'id-photo-stage-frame',
-        ref: frameRef,
-        className: `direct-image-frame crop-interaction id-photo-stage-crop ${interaction === 'sample' ? 'is-sampling' : ''}`,
-        style: { aspectRatio: `${asset.width} / ${asset.height}` },
-      }
-    : {
-        id: 'id-photo-stage-frame',
-        className: `id-photo-subject-frame clothing-composer id-photo-stage-compose ${brushEnabled ? 'brush-active' : ''}`,
-        style: { backgroundColor: needBackground ? background : 'transparent', width: '100%', height: '100%' },
-      };
 
   return <>
     <div className="panel-intro"><h3>证件照</h3><p>按向导三步完成：抠图 → 换背景 → 换衣服，结果实时显示在左侧预览。</p></div>
@@ -593,7 +729,7 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onLoadClothing, o
     </>}
 
     {step === 2 && <>
-      <div className="control-section"><div className="section-label">第 3 步 · 是否需要换衣服？</div><div className="segmented-grid two"><button type="button" className={needClothing ? 'is-selected' : ''} onClick={() => setNeedClothing(true)}>需要换衣服</button><button type="button" className={!needClothing ? 'is-selected' : ''} onClick={() => setNeedClothing(false)}>跳过</button></div>{needClothing && <div className="direct-tool-caption"><span>在左侧大图上拖动调整位置</span><span>角点/滑杆调大小 · 拖动人物调位置</span></div>}</div>
+      <div className="control-section"><div className="section-label">第 3 步 · 是否需要换衣服？</div><div className="segmented-grid two"><button type="button" className={needClothing ? 'is-selected' : ''} onClick={() => setNeedClothing(true)}>需要换衣服</button><button type="button" className={!needClothing ? 'is-selected' : ''} onClick={() => setNeedClothing(false)}>跳过</button></div>{needClothing && <div className="direct-tool-caption"><span>点按即选中所在图层并直接编辑 · 双指捏合缩放</span><span>角点/滑杆调大小 · 拖动人物调位置</span></div>}</div>
       {needClothing && <>
         <div className="control-section clothing-section"><div className="section-label">服装素材 <span className="muted">内置 {clothingCategories.reduce((sum, item) => sum + item.count, 0)} 款</span></div><div className="clothing-category-tabs">{clothingCategories.map((category) => <button type="button" key={category.id} className={clothingCategory === category.id ? 'is-selected' : ''} onClick={() => setClothingCategory(category.id)}>{category.label}</button>)}</div><div className="clothing-library">{Array.from({ length: clothingCategories.find((item) => item.id === clothingCategory)?.count ?? 0 }, (_, index) => <button type="button" key={index} disabled={clothingBusy} onClick={() => void addClothing(clothingUrl(clothingCategory, index), `${clothingCategories.find((item) => item.id === clothingCategory)?.label} ${index + 1}`)} title={`添加${clothingCategories.find((item) => item.id === clothingCategory)?.label} ${index + 1}`}><img src={clothingUrl(clothingCategory, index)} alt={`${clothingCategory} ${index + 1}`} /><span><Plus size={12} /></span></button>)}</div><input ref={clothingInputRef} type="file" accept="image/*" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void addClothing(file, file.name, uploadMatting); event.currentTarget.value = ''; }} /><div className="clothing-upload-row"><button type="button" className="clothing-upload-button" onClick={() => clothingInputRef.current?.click()} disabled={clothingBusy}><Upload size={14} />{clothingBusy ? '正在处理…' : '上传服装'}</button><button type="button" className={`toggle-row compact ${uploadMatting ? 'is-on' : ''}`} onClick={() => setUploadMatting((value) => !value)}><span className="toggle"><span /></span><span>上传后抠图</span></button></div></div>
         <div className="control-section"><div className="range-heading"><span>人物大小</span><strong>{Math.round(subjectScale)}%</strong></div><input className="range-input" type="range" min="20" max="300" value={Math.round(subjectScale)} onChange={(event) => { setSubjectScale(Number(event.target.value)); scheduleComposite(); }} /></div>
@@ -615,28 +751,21 @@ export function IdPhotoPanel({ asset, onPreview, onBrushApply, onLoadClothing, o
           <span className="id-photo-stage-tag">取景模式 · 拖动调整</span>
         </div>
       ) : preview ? (
-        <div {...stageFrameProps} onPointerDown={startBrush} onPointerMove={moveBrush} onPointerUp={(event) => void finishBrush(event)} onPointerCancel={(event) => void finishBrush(event)}>
+        <div ref={composeFrameRef} id="id-photo-stage-frame" className={`id-photo-subject-frame clothing-composer id-photo-stage-compose ${brushEnabled ? 'brush-active' : ''}`} style={{ backgroundColor: needBackground ? background : 'transparent', width: '100%', height: '100%' }} onPointerDown={(event) => void handleStagePointerDown(event)} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp}>
           {clothingLayers.filter((layer) => layer.placement === 'behind' && layer.visible).map((layer) => (
-            <div className={`clothing-canvas-layer ${activeLayerId === layer.id ? 'is-active' : ''}`} key={layer.id} data-layer-id={layer.id} style={{ left: `${layer.x}%`, top: `${layer.y}%`, width: `${layer.width}%`, zIndex: 1 }} onPointerDown={(event) => startClothingDrag(event, layer)} onPointerMove={moveClothing} onPointerUp={endClothingDrag} onPointerCancel={endClothingDrag}>
-              <img src={layer.asset.url} alt={layer.name} />
-              <span className="clothing-resize-handle" onPointerDown={(event) => startClothingResize(event, layer)} onPointerMove={moveClothingResize} onPointerUp={endClothingResize} onPointerCancel={endClothingResize} />
+            <div className={`clothing-canvas-layer ${activeLayerId === layer.id ? 'is-active' : ''}`} key={layer.id} data-layer-id={layer.id} style={{ left: `${layer.x}%`, top: `${layer.y}%`, width: `${layer.width}%`, zIndex: 1 }}>
+              <img src={layer.asset.url} alt={layer.name} draggable={false} />
+              {activeLayerId === layer.id && <span className="clothing-resize-handle" title="拖动调整服装大小 · 双指也可缩放" onPointerDown={(event) => startClothingResize(event, layer)} onPointerMove={moveClothingResize} onPointerUp={endClothingResize} onPointerCancel={endClothingResize} />}
             </div>
           ))}
-          <div
-            className="id-photo-subject-wrap"
-            style={{ left: `${subjectOffset.x}%`, top: `${subjectOffset.y}%`, width: `${subjectScale}%`, zIndex: 2 }}
-            onPointerDown={(event) => startSubjectDrag(event)}
-            onPointerMove={moveSubjectDrag}
-            onPointerUp={endSubjectDrag}
-            onPointerCancel={endSubjectDrag}
-          >
+          <div className="id-photo-subject-wrap" style={{ left: `${subjectOffset.x}%`, top: `${subjectOffset.y}%`, width: `${subjectScale}%`, zIndex: 2 }}>
             <img className="id-photo-subject-layer" src={preview.subject.url} alt="证件照主体" draggable={false} />
-            <span className="clothing-resize-handle" title="拖动调整人物大小" onPointerDown={(event) => startSubjectResize(event)} onPointerMove={moveSubjectResize} onPointerUp={endSubjectResize} onPointerCancel={endSubjectResize} />
+            {!clothingLayers.some((layer) => layer.id === activeLayerId) && <span className="clothing-resize-handle" title="拖动调整人物大小 · 双指也可缩放" onPointerDown={(event) => startSubjectResize(event)} onPointerMove={moveSubjectResize} onPointerUp={endSubjectResize} onPointerCancel={endSubjectResize} />}
           </div>
           {clothingLayers.filter((layer) => layer.placement === 'front' && layer.visible).map((layer) => (
-            <div className={`clothing-canvas-layer ${activeLayerId === layer.id ? 'is-active' : ''}`} key={layer.id} data-layer-id={layer.id} style={{ left: `${layer.x}%`, top: `${layer.y}%`, width: `${layer.width}%`, zIndex: 3 }} onPointerDown={(event) => startClothingDrag(event, layer)} onPointerMove={moveClothing} onPointerUp={endClothingDrag} onPointerCancel={endClothingDrag}>
-              <img src={layer.asset.url} alt={layer.name} />
-              <span className="clothing-resize-handle" onPointerDown={(event) => startClothingResize(event, layer)} onPointerMove={moveClothingResize} onPointerUp={endClothingResize} onPointerCancel={endClothingResize} />
+            <div className={`clothing-canvas-layer ${activeLayerId === layer.id ? 'is-active' : ''}`} key={layer.id} data-layer-id={layer.id} style={{ left: `${layer.x}%`, top: `${layer.y}%`, width: `${layer.width}%`, zIndex: 3 }}>
+              <img src={layer.asset.url} alt={layer.name} draggable={false} />
+              {activeLayerId === layer.id && <span className="clothing-resize-handle" title="拖动调整服装大小 · 双指也可缩放" onPointerDown={(event) => startClothingResize(event, layer)} onPointerMove={moveClothingResize} onPointerUp={endClothingResize} onPointerCancel={endClothingResize} />}
             </div>
           ))}
           {strokePoints.length > 0 && <svg className="brush-mask-preview" viewBox={`0 0 ${subjectWidth} ${subjectHeight}`} preserveAspectRatio="none" aria-hidden="true">{strokePoints.length === 1 ? <circle cx={strokePoints[0].x * subjectWidth / 100} cy={strokePoints[0].y * subjectHeight / 100} r={brushSize / 2} fill={brushMode === 'erase' ? '#e78f49' : '#6f9fda'} opacity=".65" /> : <polyline points={brushPath} fill="none" stroke={brushMode === 'erase' ? '#e78f49' : '#6f9fda'} strokeWidth={brushSize} strokeLinecap="round" strokeLinejoin="round" opacity=".65" />}</svg>}
