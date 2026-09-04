@@ -199,9 +199,9 @@ function PreviewImage({ document, editValues, compare, onOverlayHost, activeTool
   const stageRef = useRef<HTMLDivElement>(null);
   const pointersRef = useRef(new Map<number, PreviewPoint>());
   const interactionRef = useRef<PreviewInteraction>(null);
-  const layerDragRef = useRef<{ id: string; startX: number; startY: number; initialOffsetX: number; initialOffsetY: number; scaleX: number; scaleY: number; zoom: number } | null>(null);
-  const layerResizeRef = useRef<{ id: string; startX: number; startY: number; initialWidth: number; initialHeight: number; initialOffsetX: number; initialOffsetY: number; scaleX: number; scaleY: number; zoom: number } | null>(null);
-  const layerRotateRef = useRef<{ id: string; centerX: number; centerY: number; startAngle: number; initialRotation: number } | null>(null);
+  const layerDragRef = useRef<{ id: string; startX: number; startY: number; initialOffsetX: number; initialOffsetY: number; scaleX: number; scaleY: number; zoom: number; raf: number | null } | null>(null);
+  const layerResizeRef = useRef<{ id: string; startX: number; startY: number; initialWidth: number; initialHeight: number; initialOffsetX: number; initialOffsetY: number; scaleX: number; scaleY: number; zoom: number; raf: number | null } | null>(null);
+  const layerRotateRef = useRef<{ id: string; centerX: number; centerY: number; startAngle: number; initialRotation: number; raf: number | null } | null>(null);
   const [zoom, setZoom] = useState(MIN_PREVIEW_ZOOM);
   const [offset, setOffset] = useState<PreviewPoint>({ x: 0, y: 0 });
   const [displaySize, setDisplaySize] = useState({ width: 0, height: 0 });
@@ -252,7 +252,7 @@ function PreviewImage({ document, editValues, compare, onOverlayHost, activeTool
           const layer = document.layers.find((item) => item.id === layerId);
           if (layer) {
             const point = localPoint(event);
-            layerResizeRef.current = { id: layerId, startX: point.x, startY: point.y, initialWidth: layer.width, initialHeight: layer.height, initialOffsetX: layer.offsetX, initialOffsetY: layer.offsetY, scaleX, scaleY, zoom };
+            layerResizeRef.current = { id: layerId, startX: point.x, startY: point.y, initialWidth: layer.width, initialHeight: layer.height, initialOffsetX: layer.offsetX, initialOffsetY: layer.offsetY, scaleX, scaleY, zoom, raf: null };
             event.preventDefault();
             event.stopPropagation();
             return;
@@ -267,7 +267,7 @@ function PreviewImage({ document, editValues, compare, onOverlayHost, activeTool
             const centerY = rect.top + rect.height / 2;
             const point = localPoint(event);
             const startAngle = Math.atan2(point.y - centerY, point.x - centerX) * 180 / Math.PI;
-            layerRotateRef.current = { id: layerId, centerX, centerY, startAngle, initialRotation: layer.rotation ?? 0 };
+            layerRotateRef.current = { id: layerId, centerX, centerY, startAngle, initialRotation: layer.rotation ?? 0, raf: null };
             event.preventDefault();
             event.stopPropagation();
             return;
@@ -278,7 +278,7 @@ function PreviewImage({ document, editValues, compare, onOverlayHost, activeTool
           const layer = document.layers.find((item) => item.id === layerId);
           if (layer) {
             const point = localPoint(event);
-            layerDragRef.current = { id: layerId, startX: point.x, startY: point.y, initialOffsetX: layer.offsetX, initialOffsetY: layer.offsetY, scaleX, scaleY, zoom };
+            layerDragRef.current = { id: layerId, startX: point.x, startY: point.y, initialOffsetX: layer.offsetX, initialOffsetY: layer.offsetY, scaleX, scaleY, zoom, raf: null };
           }
         } else {
           onLayerSelect?.(layerId);
@@ -308,7 +308,17 @@ function PreviewImage({ document, editValues, compare, onOverlayHost, activeTool
       const drag = layerDragRef.current;
       const dx = (point.x - drag.startX) / (drag.scaleX * drag.zoom);
       const dy = (point.y - drag.startY) / (drag.scaleY * drag.zoom);
-      onLayerUpdate?.(drag.id, { offsetX: drag.initialOffsetX + dx, offsetY: drag.initialOffsetY + dy });
+      drag.initialOffsetX += dx;
+      drag.initialOffsetY += dy;
+      drag.startX = point.x;
+      drag.startY = point.y;
+      if (!drag.raf) {
+        drag.raf = requestAnimationFrame(() => {
+          if (!layerDragRef.current) return;
+          onLayerUpdate?.(layerDragRef.current.id, { offsetX: layerDragRef.current.initialOffsetX, offsetY: layerDragRef.current.initialOffsetY });
+          layerDragRef.current.raf = null;
+        });
+      }
       return;
     }
     if (layerResizeRef.current) {
@@ -322,7 +332,19 @@ function PreviewImage({ document, editValues, compare, onOverlayHost, activeTool
       const newHeight = Math.max(10, resize.initialHeight + delta / aspect);
       const newOffsetX = resize.initialOffsetX - (newWidth - resize.initialWidth) / 2;
       const newOffsetY = resize.initialOffsetY - (newHeight - resize.initialHeight) / 2;
-      onLayerUpdate?.(resize.id, { width: newWidth, height: newHeight, offsetX: newOffsetX, offsetY: newOffsetY });
+      resize.initialWidth = newWidth;
+      resize.initialHeight = newHeight;
+      resize.initialOffsetX = newOffsetX;
+      resize.initialOffsetY = newOffsetY;
+      resize.startX = point.x;
+      resize.startY = point.y;
+      if (!resize.raf) {
+        resize.raf = requestAnimationFrame(() => {
+          if (!layerResizeRef.current) return;
+          onLayerUpdate?.(layerResizeRef.current.id, { width: layerResizeRef.current.initialWidth, height: layerResizeRef.current.initialHeight, offsetX: layerResizeRef.current.initialOffsetX, offsetY: layerResizeRef.current.initialOffsetY });
+          layerResizeRef.current.raf = null;
+        });
+      }
       return;
     }
     if (layerRotateRef.current) {
@@ -330,7 +352,15 @@ function PreviewImage({ document, editValues, compare, onOverlayHost, activeTool
       const rotate = layerRotateRef.current;
       const currentAngle = Math.atan2(point.y - rotate.centerY, point.x - rotate.centerX) * 180 / Math.PI;
       const delta = currentAngle - rotate.startAngle;
-      onLayerUpdate?.(rotate.id, { rotation: rotate.initialRotation + delta });
+      rotate.initialRotation += delta;
+      rotate.startAngle = currentAngle;
+      if (!rotate.raf) {
+        rotate.raf = requestAnimationFrame(() => {
+          if (!layerRotateRef.current) return;
+          onLayerUpdate?.(layerRotateRef.current.id, { rotation: layerRotateRef.current.initialRotation });
+          layerRotateRef.current.raf = null;
+        });
+      }
       return;
     }
 
@@ -352,6 +382,9 @@ function PreviewImage({ document, editValues, compare, onOverlayHost, activeTool
   }
 
   function handlePointerEnd(event: React.PointerEvent<HTMLDivElement>) {
+    if (layerDragRef.current?.raf) cancelAnimationFrame(layerDragRef.current.raf);
+    if (layerResizeRef.current?.raf) cancelAnimationFrame(layerResizeRef.current.raf);
+    if (layerRotateRef.current?.raf) cancelAnimationFrame(layerRotateRef.current.raf);
     layerDragRef.current = null;
     layerResizeRef.current = null;
     layerRotateRef.current = null;
@@ -396,10 +429,9 @@ function PreviewImage({ document, editValues, compare, onOverlayHost, activeTool
               <div
                 key={layer.id}
                 data-layer-id={layer.id}
+                className="collage-layer"
                 style={{
-                  position: 'absolute',
-                  left: layer.offsetX * scaleX,
-                  top: layer.offsetY * scaleY,
+                  transform: `translate3d(${layer.offsetX * scaleX}px, ${layer.offsetY * scaleY}px, 0)`,
                   width: layer.width * scaleX,
                   height: layer.height * scaleY,
                   cursor: activeTool === 'collage' ? 'move' : undefined,
