@@ -3,7 +3,7 @@ import type { ImageAsset } from '../types';
 import { generateQrCodeAsset, generateQrCodeDataURL } from '../core/qrcode';
 import { Download, ImagePlus, QrCode } from 'lucide-react';
 
-  type QrLogo = { dataUrl: string; size: number } | undefined;
+type QrLogo = { dataUrl: string; size: number } | undefined;
 
 export function QrCodePanel({ onGenerate }: { onGenerate: (asset: ImageAsset) => Promise<void> }) {
   const [text, setText] = useState('https://example.com');
@@ -39,21 +39,6 @@ export function QrCodePanel({ onGenerate }: { onGenerate: (asset: ImageAsset) =>
     }
   }
 
-  async function handleDownload() {
-    setGenerating(true);
-    try {
-      const asset = await generateQrCodeAsset({ text, width, fgColor, bgColor, logo });
-      const url = URL.createObjectURL(asset.blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = asset.name;
-      link.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } finally {
-      setGenerating(false);
-    }
-  }
-
   function chooseLogo(file: File | undefined) {
     if (!file?.type.startsWith('image/')) return;
     const reader = new FileReader();
@@ -65,7 +50,7 @@ export function QrCodePanel({ onGenerate }: { onGenerate: (asset: ImageAsset) =>
 
   return (
     <>
-      <div className="panel-intro"><h3>生成二维码</h3><p>输入内容，选择颜色和 Logo，实时预览后下载或嵌入当前文档。</p></div>
+      <div className="panel-intro"><h3>生成二维码</h3><p>输入内容，选择颜色和 Logo，生成后将嵌入当前文档，在左侧实时预览中查看。</p></div>
       <div className="control-section">
         <label className="field"><span>内容</span><div className="field-control"><input value={text} onChange={(event) => setText(event.target.value)} placeholder="文本或链接" /></div></label>
         <div className="field-grid">
@@ -85,12 +70,7 @@ export function QrCodePanel({ onGenerate }: { onGenerate: (asset: ImageAsset) =>
         )}
       </div>
       <div className="control-section">
-        <div className="section-label">预览</div>
-        <div className="qr-preview"><img src={preview ?? ''} alt="二维码预览" /></div>
-      </div>
-      <div className="control-section">
-        <button className="secondary-button full" onClick={handleDownload} disabled={generating || !preview}><Download size={16} /> 下载图片</button>
-        <button className="apply-button" onClick={handleGenerate} disabled={generating || !preview}><QrCode size={16} /> 嵌入当前文档</button>
+        <button className="apply-button full" onClick={handleGenerate} disabled={generating || !preview}><QrCode size={16} /> 嵌入当前文档</button>
       </div>
     </>
   );
