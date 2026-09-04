@@ -421,3 +421,6 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .cleanup-template-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
 .app-shell.theme-dark .cleanup-template-thumb { background: #202522; border-color: #3a433d; }
 .app-shell.theme-dark .cleanup-template-thumb strong { color: #d5e0cd; }
+.layer-selection-border { position: absolute; inset: -2px; border: 2px solid #3b82f6; pointer-events: none; }
+.layer-resize-handle { position: absolute; right: -7px; bottom: -7px; width: 14px; height: 14px; background: #3b82f6; border: 2px solid #fff; border-radius: 2px; cursor: nwse-resize; z-index: 10; }
+.layer-rotate-handle { position: absolute; top: -28px; left: 50%; transform: translateX(-50%); width: 14px; height: 14px; background: #3b82f6; border: 2px solid #fff; border-radius: 50%; cursor: grab; z-index: 10; }
